@@ -24,7 +24,7 @@ def experiment(train_trials:list[int], trial_length:int = 80, noise_level:float 
     torch.manual_seed(2026)  # for reproducibility
     np.random.seed(2026)
     # HVA 0: border regions (Pyr 0 and Pyr 2), HVA 1: center region (Pyr 1)
-    HVA_weights = get_hva_tuning([0.475, 0.05, 0.475], [0.05, 0.9, 0.05])
+    HVA_weights = get_hva_tuning([0.475, 0.475, 0.05], [0.05, 0.475, 0.475])
     model = Minimal(HVA_tuning=HVA_weights)
     
     trial_patterns = get_patterns() # Hardcoded trial patterns for testing
@@ -38,7 +38,7 @@ def experiment(train_trials:list[int], trial_length:int = 80, noise_level:float 
                                                noise_level=noise_level)
 
     # Test all trials before training
-    I_all_trials = get_minimal_data(*trial_patterns, n_trials=10, trial_length=trial_length, 
+    I_all_trials = get_minimal_data(*trial_patterns, n_trials=14, trial_length=trial_length, 
                                     to_tensor=True, noise_level=noise_level)
     activity_initial_all_trials = model(I_all_trials, train=False)
     plot_out(activity_initial_all_trials, I_all_trials, title='Model Activity Before Training', save=True)
@@ -53,4 +53,5 @@ def experiment(train_trials:list[int], trial_length:int = 80, noise_level:float 
 
 if __name__ == "__main__":
     # test_minimal()
-    experiment(train_trials=[0, 1, 2]) # train on patterns that activate all inputs and individual pyramidal neurons
+    # train on left-ish patterns (expect stimulus more on the left)
+    experiment(train_trials=[1, 2, 6, 10, 11])

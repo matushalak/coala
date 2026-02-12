@@ -69,9 +69,9 @@ class Minimal(torch.nn.Module):
         self.ema_hva = EMA(shape=self.n_hva, alpha=cell_type_alphas['Pyramidal'])
 
         # learning rates for local learning rules
-        self.lr_Iy = torch.nn.Parameter(torch.tensor(0.01))  # learning rate for inhibitory PV-Pyramidal weights
-        self.lr_FFy = torch.nn.Parameter(torch.tensor(0.01))  # learning rate for feedforward Input-Pyramidal weights
-        self.lr_FBy = torch.nn.Parameter(torch.tensor(0.01))  # learning rate for feedback HVA-Pyramidal weights
+        self.lr_Iy = torch.nn.Parameter(torch.tensor(0.005))  # learning rate for inhibitory PV-Pyramidal weights
+        self.lr_FFy = torch.nn.Parameter(torch.tensor(0.1))  # learning rate for feedforward Input-Pyramidal weights
+        self.lr_FBy = torch.nn.Parameter(torch.tensor(0.05))  # learning rate for feedback HVA-Pyramidal weights
 
     def forward(self, I:torch.Tensor, train:bool = False) -> torch.Tensor:
         # To store pyramidal, PV, and HVA activations over time
@@ -118,7 +118,9 @@ class Minimal(torch.nn.Module):
         # Anti-Hebbian delta W_FFy (masked)
         self.W_FFy -= self.lr_FFy * torch.outer(pyramidal, stim) * self.mask_FFy
         # Hebbian delta W_FBy (masked)
-        self.W_FBy += self.lr_FBy * torch.outer(pyramidal, hva) * self.mask_FBy
+        context = torch.outer(torch.ones_like(pyramidal), hva) # general context
+        context += torch.outer(pyramidal, hva) # synapse-specific
+        self.W_FBy += self.lr_FBy * context * self.mask_FBy
 
         
     def _create_mask_RF(self, n_out: int, n_in: int, RF_indices: torch.Tensor|list) -> torch.Tensor:

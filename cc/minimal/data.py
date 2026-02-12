@@ -51,5 +51,7 @@ def get_patterns()-> tuple[list[int]]:
             [1, 1, 0, 0, 0, 0], [0,0,1,1,0,0], [0,0,0,0,1,1],
             # activate alternating inputs to test PV inhibition (4-5)
             [1,0,1,0,1,0], [0,1,0,1,0,1],
-            # test HVA feeedback by activating different combinations of PyCs (6-10)
-            [1,0,0,1,0,0], [0,1,0,0,1,0], [0,0,1,0,0,1], [1,0,0,0,0,1])
+            # test HVA feeedback by activating different combinations of PyCs (6-9)
+            [1,0,0,1,0,0], [0,1,0,0,1,0], [0,0,1,0,0,1], [1,0,0,0,0,1],
+            # one-side biased patterns to test training effects (10-13)
+            [1,1,1,0,0,0], [1,1,0,1,0,0], [0,0,0,1,1,1], [0,0,1,0,1,1])
