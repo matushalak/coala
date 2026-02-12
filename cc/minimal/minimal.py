@@ -8,7 +8,7 @@ class Minimal(torch.nn.Module):
                  n_pv:int = 2,
                  n_hva:int = 2,
                  HVA_tuning:torch.Tensor | None = None,
-                 cell_type_alphas:dict[str, float] = {'PV': 0.25, 'Pyramidal': 0.1}): # PV: 'fast spiking'
+                 cell_type_alphas:dict[str: float] = {'PV': 0.25, 'Pyramidal': 0.1}): # PV: 'fast spiking'
         '''
         NOTE: Currently PV cells perform feedforward inhibition, instead of lateral inhibition
         TODO: implement lateral inhibition by PVs, and update receptive fields and masks accordingly
@@ -38,7 +38,7 @@ class Minimal(torch.nn.Module):
         # Layer 1 W_FFy: Feedforward Input-Pyramidal neuron (Y) weights (Y x I)
         self.W_FFy = torch.nn.Parameter(torch.ones(n_pyramidal, n_inputs), requires_grad=False)
         # Layer 1 W_Iy: Inhibitory PV-Pyramidal neuron weights (Y x PV)
-        self.W_Iy = torch.nn.Parameter(torch.ones(n_pyramidal, n_pv), requires_grad=False)
+        self.W_Iy = torch.nn.Parameter(0.6*torch.ones(n_pyramidal, n_pv), requires_grad=False)
         # Layer 2 W_FFh: Feedforward Pyramidal-HVA neuron weights (HVA x Y)
         if HVA_tuning is not None: # initialize with specific tuning pattern
             assert HVA_tuning.shape == (n_hva, n_pyramidal), "HVA_tuning must have shape (n_hva, n_pyramidal)"
@@ -46,7 +46,7 @@ class Minimal(torch.nn.Module):
         else: # initialize with random weights
             self.W_FFh = torch.nn.Parameter(torch.ones(n_hva, n_pyramidal), requires_grad=False)
         # Layer 2 W_FBy: Feedback HVA-Pyramidal neuron weights (Y x HVA)
-        self.W_FBy = torch.nn.Parameter(0.1*torch.ones(n_pyramidal, n_hva), requires_grad=False)
+        self.W_FBy = torch.nn.Parameter(0.01*torch.ones(n_pyramidal, n_hva), requires_grad=False)
 
         # Create boolean masks for local weights based on receptive fields
         # Mask for W_FFpv (PV x I): each PV neuron connects to inputs in its RF
@@ -69,9 +69,9 @@ class Minimal(torch.nn.Module):
         self.ema_hva = EMA(shape=self.n_hva, alpha=cell_type_alphas['Pyramidal'])
 
         # learning rates for local learning rules
-        self.lr_Iy = torch.nn.Parameter(torch.tensor(0.005))  # learning rate for inhibitory PV-Pyramidal weights
-        self.lr_FFy = torch.nn.Parameter(torch.tensor(0.1))  # learning rate for feedforward Input-Pyramidal weights
-        self.lr_FBy = torch.nn.Parameter(torch.tensor(0.05))  # learning rate for feedback HVA-Pyramidal weights
+        self.lr_Iy = torch.nn.Parameter(torch.tensor(0.0025))  # learning rate for inhibitory PV-Pyramidal weights
+        self.lr_FFy = torch.nn.Parameter(torch.tensor(0.0035))  # learning rate for feedforward Input-Pyramidal weights
+        self.lr_FBy = torch.nn.Parameter(torch.tensor(0.005))  # learning rate for feedback HVA-Pyramidal weights
 
     def forward(self, I:torch.Tensor, train:bool = False) -> torch.Tensor:
         # To store pyramidal, PV, and HVA activations over time
@@ -97,6 +97,7 @@ class Minimal(torch.nn.Module):
             out['Pyramidal'][:, t] = pyramidal  # store all pyramidal activations
             out['PV'][:, t] = pv  # store all PV activations
             out['HVA'][:, t] = hva  # store all HVA activations
+        self._reset_state()
         return out
 
     @torch.no_grad()
@@ -115,11 +116,13 @@ class Minimal(torch.nn.Module):
         '''
         # Hebbian delta W_Iy (masked)
         self.W_Iy += self.lr_Iy * torch.outer(pyramidal, pv) * self.mask_Iy
+        
         # Anti-Hebbian delta W_FFy (masked)
         self.W_FFy -= self.lr_FFy * torch.outer(pyramidal, stim) * self.mask_FFy
+        
         # Hebbian delta W_FBy (masked)
-        context = torch.outer(torch.ones_like(pyramidal), hva) # general context
-        context += torch.outer(pyramidal, hva) # synapse-specific
+        context = 0.8 * torch.outer(torch.ones_like(pyramidal), hva) # general context
+        context += 0.2 * torch.outer(pyramidal, hva) # synapse-specific context
         self.W_FBy += self.lr_FBy * context * self.mask_FBy
 
         
@@ -140,3 +143,8 @@ class Minimal(torch.nn.Module):
         for i in range(n_out):
             mask[i, RF_indices[i]] = True
         return mask
+    
+    def _reset_state(self):
+        self.ema_pv.reset_state()
+        self.ema_pyramidal.reset_state()
+        self.ema_hva.reset_state()

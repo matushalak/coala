@@ -16,7 +16,7 @@ def test_minimal():
     output = model(I)
     plot_out(output, I)
 
-def experiment(train_trials:list[int], trial_length:int = 80, noise_level:float = 0.1):
+def experiment(train_trials:list[int], trial_length:int = 80, training_trials_per_type:int = 10, noise_level:float = 0.1):
     '''
     Based selection of training trials; 
         different connections will become adapted / strengthened
@@ -54,4 +54,4 @@ def experiment(train_trials:list[int], trial_length:int = 80, noise_level:float 
 if __name__ == "__main__":
     # test_minimal()
     # train on left-ish patterns (expect stimulus more on the left)
-    experiment(train_trials=[1, 2, 6, 10, 11])
+    experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, trial_length=100, training_trials_per_type=20)

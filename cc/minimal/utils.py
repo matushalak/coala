@@ -7,6 +7,8 @@ import torch
 class EMA(torch.nn.Module):
     '''
     EMA = Discretized Leaky Integrator
+        Low alpha: slower integration, more history dependence, more decay
+        High alpha: faster integration, more current input dependence, less decay
     '''
     def __init__(self, shape:tuple, alpha:float = 0.1):
         super().__init__()
@@ -16,6 +18,9 @@ class EMA(torch.nn.Module):
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         self.ema = (1 - self.alpha) * self.ema + self.alpha * x
         return self.ema
+    
+    def reset_state(self):
+        self.ema.zero_()
 
 def nonnegative(x:torch.Tensor)->torch.Tensor:
     '''
@@ -114,6 +119,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
             label=f"Pyr {i}",
         )
     axes[row].set_ylabel("Pyramidal")
+    axes[row].set_ylim(bottom=0, top=1)
     axes[row].set_title("Pyramidal Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
     row += 1
@@ -122,6 +128,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
     for i in range(hva.shape[0]):
         axes[row].plot(time, hva[i], color=hva_colors[i], alpha=0.9, linewidth=1.8, label=f"HVA {i}")
     axes[row].set_ylabel("HVA")
+    axes[row].set_ylim(bottom=0, top=0.4)
     axes[row].set_title("HVA Activations")
     axes[row].set_xlabel("Time")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
