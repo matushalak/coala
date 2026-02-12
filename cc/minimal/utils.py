@@ -1,7 +1,21 @@
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
+
+class EMA(torch.nn.Module):
+    '''
+    EMA = Discretized Leaky Integrator
+    '''
+    def __init__(self, shape:tuple, alpha:float = 0.1):
+        super().__init__()
+        self.alpha = alpha
+        self.ema = torch.zeros(shape, requires_grad=False)
+    
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        self.ema = (1 - self.alpha) * self.ema + self.alpha * x
+        return self.ema
 
 def nonnegative(x:torch.Tensor)->torch.Tensor:
     '''
@@ -26,8 +40,11 @@ def get_hva_tuning(*args)->torch.Tensor:
     return tuning
 
 
-def plot_out(out: dict, I: torch.Tensor | None = None, figsize: tuple[int, int] = (12, 8),
-             title: str = "Model Activity Over Time", show:bool = True) -> tuple[plt.Figure, np.ndarray]:
+def plot_out(out: dict, I: torch.Tensor | None = None, 
+             figsize: tuple[int, int] = (12, 8),
+             title: str = "Model Activity Over Time", 
+             show:bool = True, 
+             save:bool = False, savedir:str = 'plots') -> tuple[plt.Figure, np.ndarray]:
     """
     Plot model activity over time with per-neuron color palettes:
     - input: rainbow palette (stacked channels)
@@ -112,6 +129,10 @@ def plot_out(out: dict, I: torch.Tensor | None = None, figsize: tuple[int, int] 
     axes[row].set_xlim(float(time[0]), float(time[-1]))
     fig.suptitle(title, fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 1])
+    if save:
+        os.makedirs(savedir, exist_ok=True)
+        filename = f"{title.replace(' ', '_')}.png"
+        fig.savefig(os.path.join(savedir, filename), dpi=300, bbox_inches='tight')
     if show:
         plt.show()
     return fig, axes
