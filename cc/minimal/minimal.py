@@ -1,7 +1,5 @@
 import torch
-from matplotlib import pyplot as plt
-from utils import plot_out, nonnegative, get_hva_tuning
-from data import get_minimal_data_stream
+from utils import nonnegative
 
 class Minimal(torch.nn.Module):
     def __init__(self,
@@ -60,7 +58,7 @@ class Minimal(torch.nn.Module):
         # Neuron nonlinear activation function (e.g., sigmoid, tanh, ReLU)
         self.activation = torch.nn.ReLU() # benefit of ReLU, stay 0 at 0 input
 
-    def forward(self, I:torch.Tensor, hva_ini:torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, I:torch.Tensor, hva_ini:torch.Tensor | None = None, train:bool = False) -> torch.Tensor:
         # To store pyramidal, PV, and HVA activations over time
         out = {'Pyramidal': torch.zeros(self.n_pyramidal, I.shape[0]), 
                'PV': torch.zeros(self.n_pv, I.shape[0]), 
@@ -78,6 +76,8 @@ class Minimal(torch.nn.Module):
             pyramidal = self.activation(pyramidal)  # apply nonlinearity
             # HVA neuron activations based on current pyramidal activations
             hva = self.activation(nonnegative(self.W_FFh)*self.mask_FFh @ pyramidal)
+            if train:
+                self.update(pyramidal, pv, hva) # update weights based on local learning rules
             # store activations for this timestep
             out['Pyramidal'][:, t] = pyramidal  # store all pyramidal activations
             out['PV'][:, t] = pv  # store all PV activations
@@ -85,7 +85,7 @@ class Minimal(torch.nn.Module):
         return out
 
     @torch.no_grad()
-    def update(self):
+    def update(self, pyramidal:torch.Tensor, pv:torch.Tensor, hva:torch.Tensor):
         # custom update rules can be implemented here
         pass
 
@@ -106,19 +106,3 @@ class Minimal(torch.nn.Module):
         for i in range(n_out):
             mask[i, RF_indices[i]] = True
         return mask
-
-
-
-if __name__ == "__main__":
-    torch.manual_seed(2026)  # for reproducibility
-    HVA_weights = get_hva_tuning([0.45, 0.1, 0.45], [0.05, 0.9, 0.05])
-    model = Minimal(HVA_tuning=HVA_weights)
-    I = get_minimal_data_stream([1, 1, 1, 1, 1, 1], 
-                                [1, 1, 0, 0, 0, 0], [0,0,1,1,0,0], [0,0,0,0,1,1],
-                                [1,0,1,0,1,0], [0,1,0,1,0,1],
-                                [1,0,0,1,0,0], [0,1,0,0,1,0], [0,0,1,0,0,1],
-                                [1,0,0,0,0,1],
-                                n_trials=10, trial_length=200)
-    output = model(I)
-    plot_out(output, I)
-    plt.show()

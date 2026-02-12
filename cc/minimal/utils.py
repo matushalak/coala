@@ -26,7 +26,8 @@ def get_hva_tuning(*args)->torch.Tensor:
     return tuning
 
 
-def plot_out(out: dict, I: torch.Tensor | None = None, figsize: tuple[int, int] = (12, 8)):
+def plot_out(out: dict, I: torch.Tensor | None = None, figsize: tuple[int, int] = (12, 8),
+             title: str = "Model Activity Over Time", show:bool = True) -> tuple[plt.Figure, np.ndarray]:
     """
     Plot model activity over time with per-neuron color palettes:
     - input: rainbow palette (stacked channels)
@@ -77,7 +78,8 @@ def plot_out(out: dict, I: torch.Tensor | None = None, figsize: tuple[int, int] 
 
     pv_colors = sns.blend_palette(["#8b0000", "#8b4513", "#ff8c00"], n_colors=pv.shape[0])
     for i in range(pv.shape[0]):
-        axes[row].plot(time, pv[i], color=pv_colors[i], alpha=0.9, linewidth=1.8, label=f"PV {i}")
+        axes[row].plot(time, pv[i], color=pv_colors[i], linestyle = '--' if i == 1 else '-', label=f"PV {i}",
+                       alpha=0.9, linewidth=1.8)
     axes[row].set_ylabel("PV")
     axes[row].set_title("PV Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
@@ -91,6 +93,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None, figsize: tuple[int, int] 
             color=pyramidal_colors[i],
             alpha=0.9,
             linewidth=1.9,
+            linestyle = '--' if i == 2 else '-',
             label=f"Pyr {i}",
         )
     axes[row].set_ylabel("Pyramidal")
@@ -107,6 +110,9 @@ def plot_out(out: dict, I: torch.Tensor | None = None, figsize: tuple[int, int] 
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
 
     axes[row].set_xlim(float(time[0]), float(time[-1]))
+    fig.suptitle(title, fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 1])
+    if show:
+        plt.show()
     return fig, axes
 
