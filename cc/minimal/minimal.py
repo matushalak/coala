@@ -1,3 +1,4 @@
+from typing import Literal
 import torch
 from utils import EMA, nonnegative
 
@@ -8,17 +9,22 @@ class Minimal(torch.nn.Module):
                  n_pv:int = 2,
                  n_hva:int = 2,
                  HVA_tuning:torch.Tensor | None = None,
-                 cell_type_alphas:dict[str: float] = {'PV': 0.25, 'Pyramidal': 0.1}): # PV: 'fast spiking'
+                 cell_type_alphas:dict[str: float] = {'PV': 0.25, 'Pyramidal': 0.1},
+                 feedback_rule:Literal['Hebbian', 'Anti-Hebbian'] = 'Hebbian'
+                 ): 
         '''
-        ✅NOTE: Currently PV cells perform feedforward inhibition, instead of lateral inhibition
-            TODO: implement lateral inhibition by PVs, and update receptive fields and masks accordingly
-            TODO: PV hebbian FF plasticity (become selective to inputs that drive them to fire)
-
+        Minimal model of cortical circuit implementing context contrasting with local learning rules.
+        
+        TODO: implement weight decay / forgetting using EMA of weights, 
+            where in absence of input, weights decay towards baseline (initial) values;
+        
         NOTE: Current FB learning rule is Hebbian
-            TODO: try anti-Hebbian FB learning rule:
-                - general strengthening (or Hebbian wrt other HVA neuron activations)
-                (apical dendrite behave like small neuron, LTP-like process when multiple apical inputs at once)
-                - anti-Hebbian wrt PyC receiving FB
+        TODO: try anti-Hebbian FB learning rule:
+            - general strengthening (or Hebbian wrt other HVA neuron activations)
+            (apical dendrite behave like small neuron, LTP-like process when multiple apical inputs at once)
+            - anti-Hebbian wrt PyC receiving FB
+
+        TODO: model parameters as input config dict
         '''
         super().__init__()
         # Store parameters
@@ -26,6 +32,7 @@ class Minimal(torch.nn.Module):
         self.n_pyramidal = n_pyramidal
         self.n_pv = n_pv
         self.n_hva = n_hva
+        self.feedback_rule = feedback_rule
 
         # Define receptive fields
         # Pyramidal neuron receptive fields (non-overlapping)
@@ -78,7 +85,7 @@ class Minimal(torch.nn.Module):
         self.mask_FBy = torch.ones(n_pyramidal, n_hva, dtype=torch.bool)
 
         # Neuron nonlinear activation function (e.g., sigmoid, tanh, ReLU)
-        self.activation = torch.nn.ReLU() # benefit of ReLU, stay 0 at 0 input
+        self.activation = torch.nn.ReLU() # benefit of ReLU & Tanh, stay 0 at 0 input
 
         # Define exponential moving averages (decay) for neuron activations
         self.ema_pv = EMA(shape=self.n_pv, alpha=cell_type_alphas['PV'])
@@ -92,8 +99,7 @@ class Minimal(torch.nn.Module):
         self.lr_FFpv = torch.nn.Parameter(torch.tensor(0.0015))  # learning rate for feedforward Input-PV weights
 
         # Define exponential moving averages (decay) for weights (to enable weight decay / forgetting)
-        # alpha controls history dependence and stability of weights (how many steps it takes to decay to baseline); 
-        # lower alpha means slower decay and more history dependence (eg. 1e-4, takes 10000 steps to decay to baseline))
+        # TODO: use this in update()
         self.ema_FFy = EMA(shape=(n_pyramidal, n_inputs), alpha=1e-4, baseline=self.W_FFy.detach().clone())  # for feedforward Input-Pyramidal weights
         self.ema_Iy = EMA(shape=(n_pyramidal, n_pv), alpha=1e-4, baseline=self.W_Iy.detach().clone())  # for inhibitory PV-Pyramidal weights
         self.ema_FBy = EMA(shape=(n_pyramidal, n_hva), alpha=1e-4, baseline=self.W_FBy.detach().clone())  # for feedback HVA-Pyramidal weights
@@ -155,10 +161,15 @@ class Minimal(torch.nn.Module):
         # Anti-Hebbian delta W_FFy (masked) - adaptation
         self.W_FFy -= self.lr_FFy * torch.outer(pyramidal, stim) * self.mask_FFy
         
-        # Hebbian delta W_FBy (masked)
-        context = 0.8 * torch.outer(torch.ones_like(pyramidal), hva) # general context
-        context += 0.2 * torch.outer(pyramidal, hva) # synapse-specific context
-        self.W_FBy += self.lr_FBy * context * self.mask_FBy
+        if self.feedback_rule == 'Hebbian':
+            # Hebbian delta W_FBy (masked)
+            context = 0.8 * torch.outer(torch.ones_like(pyramidal), hva) # general context
+            context += 0.2 * torch.outer(pyramidal, hva) # synapse-specific context
+            self.W_FBy += self.lr_FBy * context * self.mask_FBy
+        else:
+            # Anti-Hebbian delta W_FBy (masked)
+            context = torch.outer(1/(pyramidal+1), hva) # general context
+            self.W_FBy += self.lr_FBy * context * self.mask_FBy
 
         
     def _create_mask_RF(self, n_out: int, n_in: int, RF_indices: torch.Tensor|list) -> torch.Tensor:

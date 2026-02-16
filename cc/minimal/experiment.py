@@ -1,4 +1,4 @@
-
+from typing import Literal
 import torch
 import numpy as np
 from data import get_minimal_data, get_patterns, get_trial_dict, get_trial_type_minimal_data
@@ -16,16 +16,20 @@ def test_minimal():
     output = model(I)
     plot_out(output, I)
 
-def experiment(train_trials:list[int], trial_length:int = 80, training_trials_per_type:int = 10, noise_level:float = 0.1):
+def experiment(train_trials:list[int], trial_length:int = 80, 
+               training_trials_per_type:int = 10, noise_level:float = 0.1,
+               feedback_rule:Literal['Hebbian', 'Anti-Hebbian'] = 'Hebbian'):
     '''
     Based selection of training trials; 
         different connections will become adapted / strengthened
+    
+    TODO: make config and load models & save results with config info
     '''
     torch.manual_seed(2026)  # for reproducibility
     np.random.seed(2026)
     # HVA 0: border regions (Pyr 0 and Pyr 2), HVA 1: center region (Pyr 1)
     HVA_weights = get_hva_tuning([0.475, 0.475, 0.05], [0.05, 0.475, 0.475])
-    model = Minimal(HVA_tuning=HVA_weights)
+    model = Minimal(HVA_tuning=HVA_weights, feedback_rule=feedback_rule)
     
     trial_patterns = get_patterns() # Hardcoded trial patterns for testing
     trial_dict = get_trial_dict(*trial_patterns)
@@ -54,4 +58,9 @@ def experiment(train_trials:list[int], trial_length:int = 80, training_trials_pe
 if __name__ == "__main__":
     # test_minimal()
     # train on left-ish patterns (expect stimulus more on the left)
-    experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, trial_length=100, training_trials_per_type=20)
+    # Hebbian feedback rule
+    experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, trial_length=100, training_trials_per_type=20, 
+               feedback_rule='Hebbian')
+    # Anti-Hebbian feedback rule
+    # experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, trial_length=100, training_trials_per_type=20, 
+    #            feedback_rule='Anti-Hebbian')

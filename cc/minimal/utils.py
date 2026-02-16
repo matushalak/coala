@@ -7,8 +7,13 @@ import torch
 class EMA(torch.nn.Module):
     '''
     EMA (Exponential Moving Average) = Discretized Leaky Integrator
-        Low alpha: slower integration, more history dependence, more decay
-        High alpha: faster integration, more current input dependence, less decay
+        Alpha controls history dependence and stability (how many steps it takes to decay to baseline); 
+        Low alpha (eg. 1e-4): 
+            slower integration, more history dependence, 
+            slower decay, takes 10000 steps to decay to baseline
+        High alpha (eg. 1e-2): 
+            faster integration, more current input dependence, 
+            faster decay, takes 100 steps to decay to baseline
     
     If basline is provided, decay towards baseline in absence of input; 
         otherwise, decay towards 0.
@@ -108,7 +113,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
                        alpha=0.9, linewidth=1.8)
     axes[row].set_ylabel("PV")
     # make y axis log-scale
-    axes[row].set_ylim(bottom=0, top=5)
+    axes[row].set_ylim(bottom=-0.1, top=5)
     axes[row].set_title("PV Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
     row += 1
@@ -125,7 +130,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
             label=f"Pyr {i}",
         )
     axes[row].set_ylabel("Pyramidal")
-    axes[row].set_ylim(bottom=0, top=2)
+    axes[row].set_ylim(bottom=-0.1, top=2)
     axes[row].set_title("Pyramidal Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
     row += 1
@@ -134,7 +139,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
     for i in range(hva.shape[0]):
         axes[row].plot(time, hva[i], color=hva_colors[i], alpha=0.9, linewidth=1.8, label=f"HVA {i}")
     axes[row].set_ylabel("HVA")
-    axes[row].set_ylim(bottom=0, top=1)
+    axes[row].set_ylim(bottom = -0.1, top=1)
     axes[row].set_title("HVA Activations")
     axes[row].set_xlabel("Time")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
