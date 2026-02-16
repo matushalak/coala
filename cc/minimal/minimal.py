@@ -10,8 +10,15 @@ class Minimal(torch.nn.Module):
                  HVA_tuning:torch.Tensor | None = None,
                  cell_type_alphas:dict[str: float] = {'PV': 0.25, 'Pyramidal': 0.1}): # PV: 'fast spiking'
         '''
-        NOTE: Currently PV cells perform feedforward inhibition, instead of lateral inhibition
-        TODO: implement lateral inhibition by PVs, and update receptive fields and masks accordingly
+        ✅NOTE: Currently PV cells perform feedforward inhibition, instead of lateral inhibition
+            TODO: implement lateral inhibition by PVs, and update receptive fields and masks accordingly
+            TODO: PV hebbian FF plasticity (become selective to inputs that drive them to fire)
+
+        NOTE: Current FB learning rule is Hebbian
+            TODO: try anti-Hebbian FB learning rule:
+                - general strengthening (or Hebbian wrt other HVA neuron activations)
+                (apical dendrite behave like small neuron, LTP-like process when multiple apical inputs at once)
+                - anti-Hebbian wrt PyC receiving FB
         '''
         super().__init__()
         # Store parameters
@@ -24,33 +31,43 @@ class Minimal(torch.nn.Module):
         # Pyramidal neuron receptive fields (non-overlapping)
         self.RF_y_i = torch.arange(n_inputs).view(n_pyramidal, -1)  
         # Pyramidal neuron Parvalbumin inputs (overlapping)
-        self.RF_y_pv = [[p for p, p_in in enumerate(
+        self.RF_y_pv = [[pv for pv, y_in in enumerate(
             zip(list(range(n_pyramidal)), list(range(n_pyramidal))[1:]))
-                        if y in p_in] for y in range(n_pyramidal)]
-        # Parvalbumin (PV) neuron receptive fields (non-overlapping)
-        self.RF_pv = torch.arange(n_inputs).view(n_pv, -1)
+                        if y in y_in] for y in range(n_pyramidal)]
+        
+        # Parvalbumin (PV) neuron FF receptive fields (non-overlapping)
+        self.RF_pv_ff = torch.arange(n_inputs).view(n_pv, -1)
+        # Parvalbumin (PV) neuron lateral receptive fields (overlapping)
+        self.RF_pv_lateral = [[y_in for pv, y_in in enumerate(
+            zip(list(range(n_pyramidal)), list(range(n_pyramidal))[1:]))
+                        if Pv == pv] for Pv in range(n_pv)]
+
         # HVA neuron receptive fields (overlapping)
         self.RF_hva = torch.arange(n_pyramidal).tile(n_hva).view(n_hva, -1)
 
         # Define layers weights
         # Layer 1 W_FFpv: Input-Parvalbumin (PV) neuron weights (PV x I)
-        self.W_FFpv = torch.nn.Parameter(torch.ones(n_pv, n_inputs, requires_grad=False))
+        self.W_FFpv = torch.nn.Parameter(0.1*torch.ones(n_pv, n_inputs, requires_grad=False))
+        # Layer 1 W_LatPV: Lateral Y-PV weights (PV x Y)
+        self.W_LatPV = torch.nn.Parameter(0.75*torch.ones(n_pv, n_pyramidal), requires_grad=False)
         # Layer 1 W_FFy: Feedforward Input-Pyramidal neuron (Y) weights (Y x I)
         self.W_FFy = torch.nn.Parameter(torch.ones(n_pyramidal, n_inputs), requires_grad=False)
         # Layer 1 W_Iy: Inhibitory PV-Pyramidal neuron weights (Y x PV)
-        self.W_Iy = torch.nn.Parameter(0.6*torch.ones(n_pyramidal, n_pv), requires_grad=False)
+        self.W_Iy = torch.nn.Parameter(0.3*torch.ones(n_pyramidal, n_pv), requires_grad=False)
         # Layer 2 W_FFh: Feedforward Pyramidal-HVA neuron weights (HVA x Y)
         if HVA_tuning is not None: # initialize with specific tuning pattern
             assert HVA_tuning.shape == (n_hva, n_pyramidal), "HVA_tuning must have shape (n_hva, n_pyramidal)"
             self.W_FFh = torch.nn.Parameter(HVA_tuning, requires_grad=False)
-        else: # initialize with random weights
+        else: # initialize with constant weights
             self.W_FFh = torch.nn.Parameter(torch.ones(n_hva, n_pyramidal), requires_grad=False)
         # Layer 2 W_FBy: Feedback HVA-Pyramidal neuron weights (Y x HVA)
-        self.W_FBy = torch.nn.Parameter(0.01*torch.ones(n_pyramidal, n_hva), requires_grad=False)
+        self.W_FBy = torch.nn.Parameter(0.1*torch.ones(n_pyramidal, n_hva), requires_grad=False)
 
         # Create boolean masks for local weights based on receptive fields
         # Mask for W_FFpv (PV x I): each PV neuron connects to inputs in its RF
-        self.mask_FFpv = self._create_mask_RF(n_pv, n_inputs, self.RF_pv)
+        self.mask_FFpv = self._create_mask_RF(n_pv, n_inputs, self.RF_pv_ff)
+        # Mask for W_LatPV (PV x Y): each PV neuron connects to pyramidal neurons in its lateral RF
+        self.mask_LatPV = self._create_mask_RF(n_pv, n_pyramidal, self.RF_pv_lateral)
         # Mask for W_Iy (Y x PV): inhibition from PV to pyramidal
         self.mask_Iy = self._create_mask_RF(n_pyramidal, n_pv, self.RF_y_pv)
         # Mask for W_FFy (Y x I): each pyramidal neuron connects to inputs in its RF
@@ -63,15 +80,25 @@ class Minimal(torch.nn.Module):
         # Neuron nonlinear activation function (e.g., sigmoid, tanh, ReLU)
         self.activation = torch.nn.ReLU() # benefit of ReLU, stay 0 at 0 input
 
-        # Define exponential moving averages for tracking neuron history
+        # Define exponential moving averages (decay) for neuron activations
         self.ema_pv = EMA(shape=self.n_pv, alpha=cell_type_alphas['PV'])
         self.ema_pyramidal = EMA(shape=self.n_pyramidal, alpha=cell_type_alphas['Pyramidal'])
         self.ema_hva = EMA(shape=self.n_hva, alpha=cell_type_alphas['Pyramidal'])
 
         # learning rates for local learning rules
         self.lr_Iy = torch.nn.Parameter(torch.tensor(0.0025))  # learning rate for inhibitory PV-Pyramidal weights
-        self.lr_FFy = torch.nn.Parameter(torch.tensor(0.0035))  # learning rate for feedforward Input-Pyramidal weights
-        self.lr_FBy = torch.nn.Parameter(torch.tensor(0.005))  # learning rate for feedback HVA-Pyramidal weights
+        self.lr_FFy = torch.nn.Parameter(torch.tensor(0.005))  # learning rate for feedforward Input-Pyramidal weights
+        self.lr_FBy = torch.nn.Parameter(torch.tensor(0.0035))  # learning rate for feedback HVA-Pyramidal weights
+        self.lr_FFpv = torch.nn.Parameter(torch.tensor(0.0015))  # learning rate for feedforward Input-PV weights
+
+        # Define exponential moving averages (decay) for weights (to enable weight decay / forgetting)
+        # alpha controls history dependence and stability of weights (how many steps it takes to decay to baseline); 
+        # lower alpha means slower decay and more history dependence (eg. 1e-4, takes 10000 steps to decay to baseline))
+        self.ema_FFy = EMA(shape=(n_pyramidal, n_inputs), alpha=1e-4, baseline=self.W_FFy.detach().clone())  # for feedforward Input-Pyramidal weights
+        self.ema_Iy = EMA(shape=(n_pyramidal, n_pv), alpha=1e-4, baseline=self.W_Iy.detach().clone())  # for inhibitory PV-Pyramidal weights
+        self.ema_FBy = EMA(shape=(n_pyramidal, n_hva), alpha=1e-4, baseline=self.W_FBy.detach().clone())  # for feedback HVA-Pyramidal weights
+        self.ema_LatPV = EMA(shape=(n_pv, n_pyramidal), alpha=1e-4, baseline=self.W_LatPV.detach().clone())  # for lateral PV-Pyramidal weights
+        self.ema_Ipv = EMA(shape=(n_pv, n_inputs), alpha=1e-4, baseline=self.W_FFpv.detach().clone())  # for feedforward Input-PV weights
 
     def forward(self, I:torch.Tensor, train:bool = False) -> torch.Tensor:
         # To store pyramidal, PV, and HVA activations over time
@@ -81,9 +108,14 @@ class Minimal(torch.nn.Module):
                'Time': torch.arange(I.shape[0])}
         # Initialize HVA neuron activations
         hva = self.ema_hva.ema
+        pyramidal = self.ema_pyramidal.ema
         for t, stim in enumerate(I):
             # PV neuron activations based on current stimulus
-            pv = self.ema_pv(self.activation((nonnegative(self.W_FFpv)*self.mask_FFpv) @ stim))
+            pv = (nonnegative(self.W_FFpv)*self.mask_FFpv) @ stim
+            # Add lateral activation of PV by pyramidal
+            pv += (nonnegative(self.W_LatPV)*self.mask_LatPV) @ pyramidal
+            pv = self.ema_pv(self.activation(pv))  # apply EMA to PV activations
+
             # pyramidal neuron activations based on 
             pyramidal = (nonnegative(self.W_FFy)*self.mask_FFy) @ stim  # feedforward input (current stimulus)
             pyramidal -= (nonnegative(self.W_Iy)*self.mask_Iy) @ pv  # PV inhibition
@@ -107,6 +139,7 @@ class Minimal(torch.nn.Module):
             W_Iy (Hebbian in Y & PC)
             W_FFy (Anti-Hebbian in Y & I)
             W_FBy (Hebbian in Y & HVA)
+            W_FFpv (Hebbian in PV & Input)
         
         Input args:
             stim: current input stimulus (n_inputs)
@@ -116,8 +149,10 @@ class Minimal(torch.nn.Module):
         '''
         # Hebbian delta W_Iy (masked)
         self.W_Iy += self.lr_Iy * torch.outer(pyramidal, pv) * self.mask_Iy
+        # Hebbian delta W_FFpv (masked) - inhibition becomes more specific to inputs that drive PV activation
+        self.W_FFpv += self.lr_FFpv * torch.outer(pv, stim) * self.mask_FFpv
         
-        # Anti-Hebbian delta W_FFy (masked)
+        # Anti-Hebbian delta W_FFy (masked) - adaptation
         self.W_FFy -= self.lr_FFy * torch.outer(pyramidal, stim) * self.mask_FFy
         
         # Hebbian delta W_FBy (masked)

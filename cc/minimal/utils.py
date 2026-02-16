@@ -6,18 +6,22 @@ import torch
 
 class EMA(torch.nn.Module):
     '''
-    EMA = Discretized Leaky Integrator
+    EMA (Exponential Moving Average) = Discretized Leaky Integrator
         Low alpha: slower integration, more history dependence, more decay
         High alpha: faster integration, more current input dependence, less decay
+    
+    If basline is provided, decay towards baseline in absence of input; 
+        otherwise, decay towards 0.
     '''
-    def __init__(self, shape:tuple, alpha:float = 0.1):
+    def __init__(self, shape:tuple, alpha:float = 0.1, baseline:torch.Tensor | None = None):
         super().__init__()
         self.alpha = alpha
         self.ema = torch.zeros(shape, requires_grad=False)
+        self.baseline = baseline if baseline is not None else torch.zeros(shape, requires_grad=False)
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         self.ema = (1 - self.alpha) * self.ema + self.alpha * x
-        return self.ema
+        return self.ema + self.baseline
     
     def reset_state(self):
         self.ema.zero_()
@@ -103,6 +107,8 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
         axes[row].plot(time, pv[i], color=pv_colors[i], linestyle = '--' if i == 1 else '-', label=f"PV {i}",
                        alpha=0.9, linewidth=1.8)
     axes[row].set_ylabel("PV")
+    # make y axis log-scale
+    axes[row].set_ylim(bottom=0, top=5)
     axes[row].set_title("PV Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
     row += 1
@@ -119,7 +125,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
             label=f"Pyr {i}",
         )
     axes[row].set_ylabel("Pyramidal")
-    axes[row].set_ylim(bottom=0, top=1)
+    axes[row].set_ylim(bottom=0, top=2)
     axes[row].set_title("Pyramidal Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
     row += 1
@@ -128,7 +134,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
     for i in range(hva.shape[0]):
         axes[row].plot(time, hva[i], color=hva_colors[i], alpha=0.9, linewidth=1.8, label=f"HVA {i}")
     axes[row].set_ylabel("HVA")
-    axes[row].set_ylim(bottom=0, top=0.4)
+    axes[row].set_ylim(bottom=0, top=1)
     axes[row].set_title("HVA Activations")
     axes[row].set_xlabel("Time")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
