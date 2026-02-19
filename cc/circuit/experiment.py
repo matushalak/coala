@@ -1,9 +1,9 @@
 from typing import Literal
 import torch
 import numpy as np
-from data import get_minimal_data, get_patterns, get_trial_dict, get_trial_type_minimal_data
-from circuit import Circuit
-from utils import get_hva_tuning, plot_out
+from cc.circuit.data import get_minimal_data, get_patterns, get_trial_dict, get_trial_type_minimal_data
+from cc.circuit.circuit import Circuit
+from cc.circuit.circuit_utils import get_hva_tuning, plot_out
 
 def test_circuit():
     torch.manual_seed(2026)  # for reproducibility

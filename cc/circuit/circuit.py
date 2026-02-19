@@ -1,6 +1,6 @@
 from typing import Literal
 import torch
-from utils import EMA, nonnegative
+from cc.utils import EMA, nonnegative
 
 class Circuit(torch.nn.Module):
     def __init__(self,
