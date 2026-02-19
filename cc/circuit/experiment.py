@@ -1,3 +1,4 @@
+# author: Matúš Halák (@matushalak)
 from typing import Literal
 import torch
 import numpy as np

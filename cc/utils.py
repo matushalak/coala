@@ -1,3 +1,5 @@
+# author: Matúš Halák (@matushalak)
+from typing import Iterable
 import torch
 
 class EMA(torch.nn.Module):
@@ -33,3 +35,43 @@ def nonnegative(x:torch.Tensor)->torch.Tensor:
     Performs x'= max(0, x) elementwise, ensuring all synaptic weights are non-negative.
     '''
     return torch.clamp(x, min=0.0)
+
+def randn_reparam(size:tuple[int, ...], mu:float|Iterable, sigma:float|Iterable) -> torch.Tensor:
+    '''
+    Reparameterization trick for sampling from a normal distribution with mean mu and std sigma.
+    
+    The following cases are supported:
+        1) Generating a single sample (size=()):
+            - mu and sigma can be scalars (shape (1,)) or vectors of shape (n_features,)
+            - sample will have shape of mu
+        2) Generating a batch of samples (size=(n_samples,)):
+            - mu and sigma must be vectors of shape (n_features,) (or scalars)
+            - sample will have shape (n_samples, n_features)
+        3) Generating a matrix of samples (size=(n_samples, n_features)):
+            - mu and sigma must be scalars (shape (1,)) 
+    
+    In cases 1 and 2, sigma can also be a matrix of shape (n_features, n_features) 
+    representing a full covariance matrix.    
+    '''
+    mu = torch.as_tensor(mu)
+    sigma = torch.as_tensor(sigma)
+    
+    mu_shape = mu.shape if len(mu.shape) > 0 else (1,)
+    sigma_shape = sigma.shape if len(sigma.shape) > 0 else (1,)
+
+    assert isinstance(size, tuple), "size must be a tuple of ints. For generating a single sample, use size=()."
+    if len(size) == 1:
+        z = torch.randn(*size, *mu_shape)
+    else:
+        assert mu_shape == (1,) and sigma_shape == (1,), "mu and sigma must be scalar if generating a random matrix."
+        z = torch.randn(*size)
+    
+    if (len(sigma_shape) == 1 and sigma_shape[0] == 1):
+        sigma = sigma * torch.eye(z.shape[-1])
+    elif len(sigma_shape) == 1:
+        sigma = torch.diag(sigma) 
+    else:
+        assert sigma_shape == (mu_shape[0], mu_shape[0]), "If sigma is a matrix, it must have shape (n_features, n_features)."
+    
+    # Reparametrization trick: sample z ~ N(0, I) and transform to desired distribution    
+    return (mu + z @ sigma).squeeze()

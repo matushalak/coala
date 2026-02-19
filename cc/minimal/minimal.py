@@ -1,6 +1,7 @@
+# author: Matúš Halák (@matushalak)
 import torch
 import torch.nn as nn
-from cc.utils import EMA, nonnegative
+from cc.utils import EMA, nonnegative, randn_reparam
 
 class CCNeuron(nn.Module):
     """
@@ -20,35 +21,44 @@ class CCNeuron(nn.Module):
       dw_lat ~  (y * p)                           (Hebbian)
       dW_pv  ~  p x^T                             (Hebbian)
     """
-
+    # TODO: add weight initialization according to specified distribution
+    # using randn_reparam
     def __init__(
         self,
         n_features: int = 2,
+        n_pv: int = 2,
+        n_context: int = 2,
         activation: nn.Module | None = None,
         lr_ff: float = 0.01,
         lr_fb: float = 0.01,
         lr_lat: float = 0.01,
         lr_pv: float = 0.01,
+        pyc_decay:float = 0.1,
+        pv_decay:float = 0.25,
         alpha: float = 1.0,
         weight_decay: float = 0.0,
+        seed:int = 42,
     ):
         super().__init__()
-        if n_features != 2:
-            raise ValueError("This minimal model expects n_features=2.")
         if alpha <= 0:
             raise ValueError("alpha must be > 0.")
         if weight_decay < 0:
             raise ValueError("weight_decay must be >= 0.")
 
+        torch.manual_seed(seed) # set random seed for weight initialization
+
         self.n_features = n_features
+        self.n_pv = n_pv
+        self.n_context = n_context
         self.activation = activation if activation is not None else nn.ReLU()
 
         # Learnable weights (stored as Parameters; updated manually via local rules).
-        self.w_ff = nn.Parameter(torch.randn(n_features), requires_grad=False)
-        self.w_fb = nn.Parameter(0.1 * torch.randn(n_features), requires_grad=False)
-        self.w_lat = nn.Parameter(0.3 * torch.randn(n_features), requires_grad=False)
-        self.W_pv = nn.Parameter(0.1 * torch.randn(n_features, n_features), requires_grad=False)
-
+        self.w_ff = nn.Parameter(randn_reparam(size=(n_features,), mu=0.0, sigma=1.0), requires_grad=False)
+        self.w_fb = nn.Parameter(randn_reparam(size=(n_context,), mu=0.0, sigma=0.1), requires_grad=False)
+        self.w_lat = nn.Parameter(randn_reparam(size=(n_pv,), mu=0.0, sigma=0.3), requires_grad=False)
+        self.W_pv = nn.Parameter(randn_reparam(size=(n_pv, n_features), mu=0.0, sigma=0.1), requires_grad=False)
+        # breakpoint()
+        # Hyperpatameters
         self.lr_ff = lr_ff
         self.lr_fb = lr_fb
         self.lr_lat = lr_lat
@@ -56,33 +66,38 @@ class CCNeuron(nn.Module):
         self.alpha = alpha
         self.weight_decay = weight_decay
 
-    def forward(self, x: torch.Tensor, c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # State variables for PV and pyramidal neurons, implemented as EMAs.
+        self.pv = EMA(shape=(n_pv,), alpha=pv_decay)
+        self.pyramidal = EMA(shape=(), alpha=pyc_decay)
+
+    def forward(self, x: torch.Tensor, c: torch.Tensor
+                ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            x: bottom-up input, shape (2,)
-            c: contextual input, shape (2,)
+            x: bottom-up input, shape (n_features,)
+            c: contextual input, shape (n_context,)
         Returns:
             y: pyramidal activity, scalar tensor shape ()
-            p: PV activity, shape (2,)
+            p: PV activity, shape (n_pv,)
         """
-        if x.shape != (self.n_features,) or c.shape != (self.n_features,):
-            raise ValueError(
-                f"x and c must each have shape ({self.n_features},), "
-                f"got x={tuple(x.shape)}, c={tuple(c.shape)}."
-            )
+        assert x.shape == (self.n_features,) and c.shape == (self.n_context,)
 
-        p = self.activation(self.W_pv @ x)
-        y = self.activation(torch.dot(self.w_ff, x) + torch.dot(self.w_fb, c) - torch.dot(self.w_lat, p))
-        return y, p
+        p = self.pv(self.activation(nonnegative(self.W_pv) @ x)) # feedforward excitation to PV neurons
+        y = self.pyramidal(self.activation(
+            torch.dot(nonnegative(self.w_ff), x) # feedforward excitation
+            + torch.dot(nonnegative(self.w_fb), c) # feedback excitation
+            - torch.dot(nonnegative(self.w_lat), p) # "lateral" inhibition 
+                            )) 
+        
+        return x, y, p, c
 
     @torch.no_grad()
-    def update(self, x_t: torch.Tensor, c_t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def update(self, x_t: torch.Tensor, y_next:torch.Tensor, 
+               pv_t:torch.Tensor, c_t: torch.Tensor):
         """
         One local update step using current inputs (x_t, c_t).
         Returns y_{t+1}, p_t as computed for this step.
         """
-        y_next, p_t = self.forward(x_t, c_t)
-
         # 1) Anti-Hebbian update for w_ff
         self.w_ff -= self.lr_ff * (y_next * x_t)
 
@@ -91,10 +106,10 @@ class CCNeuron(nn.Module):
         self.w_fb += self.lr_fb * (damp * y_next * c_t)
 
         # 3) Hebbian update for w_lat
-        self.w_lat += self.lr_lat * (y_next * p_t)
+        self.w_lat += self.lr_lat * (y_next * pv_t)
 
         # 4) Hebbian update for W_pv
-        self.W_pv += self.lr_pv * torch.outer(p_t, x_t)
+        self.W_pv += self.lr_pv * torch.outer(pv_t, x_t)
 
         if self.weight_decay > 0.0:
             decay = 1.0 - self.weight_decay
@@ -103,13 +118,18 @@ class CCNeuron(nn.Module):
             self.w_lat *= decay
             self.W_pv *= decay
 
-        return y_next, p_t
+    def _reset_state(self):
+        self.pv.reset_state()
+        self.pyramidal.reset_state()
 
 if __name__ == "__main__":
     # Example usage:
     model = CCNeuron()
-    x = torch.tensor([1.0, 0.5])
-    c = torch.tensor([0.5, 1.0])
-    for step in range(10):
-        y, p = model.update(x, c)
+    n_steps = 50
+    X = torch.randn((n_steps, model.n_features)) # random input sequence
+    C = torch.randn((n_steps, model.n_context)) # random context sequence
+
+    for step in range(n_steps):
+        x, y, p, c = model(X[step], C[step])
+        update = model.update(x, y, p, c)
         print(f"Step {step}: y={y.item():.4f}, p={p.detach().numpy()}")

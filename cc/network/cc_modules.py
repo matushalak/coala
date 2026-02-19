@@ -1,3 +1,4 @@
+# author: Matúš Halák (@matushalak)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,7 +28,7 @@ class CCModule(nn.Module):
 
         self.Y_LAT, self.Y_FF, self.Y_FB = torch.zeros_like(self.Lambda_FF), torch.zeros_like(self.Lambda_FF), torch.zeros_like(self.Lambda_FF) 
     
-    def forward(self, x:torch.Tensor, context:torch.Tensor, train:bool = False)->torch.Tensor:
+    def forward(self, x:torch.Tensor, context:torch.Tensor)->torch.Tensor:
         # Compute feedforward, feedback, and lateral inhibition contributions
         self.Y_LAT = self.LAT_conv(self.Y_FF)
         self.Y_FF = self.FF_conv(x)
@@ -38,14 +39,11 @@ class CCModule(nn.Module):
 
         # Apply activation function
         Y = self.activation_fn(Y)
-
-        if train:
-            self.update_lambdas(Y)
         
         return Y
     
     @torch.no_grad()
-    def update_lambdas(self, Y:torch.Tensor, lr_FF:float = 0.01, lr_FB:float = 0.01, lr_LAT:float = 0.01):
+    def update(self, Y:torch.Tensor, lr_FF:float = 0.01, lr_FB:float = 0.01, lr_LAT:float = 0.01):
         self.Lambda_FF += lr_FF * (-self.Lambda_FF - (Y * self.Y_FF))
         self.Lambda_FB += lr_FB * (-self.Lambda_FB + ((1/(1+Y))) * (Y * self.Y_FB))
         self.Lambda_LAT += lr_LAT * (-self.Lambda_LAT + (Y * self.Y_LAT))

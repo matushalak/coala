@@ -1,3 +1,4 @@
+# author: Matúš Halák (@matushalak)
 from typing import Literal
 import torch
 from cc.utils import EMA, nonnegative

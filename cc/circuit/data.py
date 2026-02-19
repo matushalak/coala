@@ -1,3 +1,4 @@
+# author: Matúš Halák (@matushalak)
 import torch
 from numpy.random import shuffle as np_shuffle
 from typing import Iterable, Literal
