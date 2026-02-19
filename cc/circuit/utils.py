@@ -21,15 +21,16 @@ class EMA(torch.nn.Module):
     def __init__(self, shape:tuple, alpha:float = 0.1, baseline:torch.Tensor | None = None):
         super().__init__()
         self.alpha = alpha
-        self.ema = torch.zeros(shape, requires_grad=False)
         self.baseline = baseline if baseline is not None else torch.zeros(shape, requires_grad=False)
+        self.ema = self.baseline.clone()
     
+    @torch.no_grad()
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        self.ema = (1 - self.alpha) * self.ema + self.alpha * x
-        return self.ema + self.baseline
+        self.ema = (1 - self.alpha) * self.ema + self.alpha * (x+self.baseline)
+        return self.ema
     
     def reset_state(self):
-        self.ema.zero_()
+        self.ema = self.baseline.clone()
 
 def nonnegative(x:torch.Tensor)->torch.Tensor:
     '''
@@ -52,6 +53,13 @@ def get_hva_tuning(*args)->torch.Tensor:
     for i, pattern in enumerate(args):
         tuning[i, :] = torch.tensor(pattern)
     return tuning
+
+# TODO:
+def get_pv_tuning(*args)->torch.Tensor:
+    raise NotImplementedError
+
+def get_pyc_tuning(*args)->torch.Tensor:
+    raise NotImplementedError
 
 
 def plot_out(out: dict, I: torch.Tensor | None = None, 
@@ -113,7 +121,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
                        alpha=0.9, linewidth=1.8)
     axes[row].set_ylabel("PV")
     # make y axis log-scale
-    axes[row].set_ylim(bottom=-0.1, top=5)
+    # axes[row].set_ylim(bottom=-0.1, top=5)
     axes[row].set_title("PV Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
     row += 1
@@ -130,7 +138,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
             label=f"Pyr {i}",
         )
     axes[row].set_ylabel("Pyramidal")
-    axes[row].set_ylim(bottom=-0.1, top=2)
+    # axes[row].set_ylim(bottom=-0.1, top=2)
     axes[row].set_title("Pyramidal Activations")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)
     row += 1
@@ -139,7 +147,7 @@ def plot_out(out: dict, I: torch.Tensor | None = None,
     for i in range(hva.shape[0]):
         axes[row].plot(time, hva[i], color=hva_colors[i], alpha=0.9, linewidth=1.8, label=f"HVA {i}")
     axes[row].set_ylabel("HVA")
-    axes[row].set_ylim(bottom = -0.1, top=1)
+    # axes[row].set_ylim(bottom = -0.1, top=1)
     axes[row].set_title("HVA Activations")
     axes[row].set_xlabel("Time")
     axes[row].legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=9, ncol=1, frameon=False)

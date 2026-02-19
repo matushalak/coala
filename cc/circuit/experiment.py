@@ -2,21 +2,25 @@ from typing import Literal
 import torch
 import numpy as np
 from data import get_minimal_data, get_patterns, get_trial_dict, get_trial_type_minimal_data
-from minimal import Minimal
+from circuit import Circuit
 from utils import get_hva_tuning, plot_out
 
-def test_minimal():
+def test_circuit():
     torch.manual_seed(2026)  # for reproducibility
     HVA_weights = get_hva_tuning([0.45, 0.1, 0.45], [0.05, 0.9, 0.05])
-    model = Minimal(HVA_tuning=HVA_weights)
+    model = Circuit(HVA_tuning=HVA_weights)
     
     trial_patterns = get_patterns() # Hardcoded trial patterns for testing
-    I = get_minimal_data(*trial_patterns, n_trials=10, trial_length=50, to_tensor=True)
+    I = get_minimal_data(*trial_patterns, n_trials=10, stim_length=100, to_tensor=True)
    
     output = model(I)
     plot_out(output, I)
 
-def experiment(train_trials:list[int], trial_length:int = 80, 
+# TODO add occluded patterns to test HVA feedback effects on filling in missing info
+# TODO longer stimulus duration see effects
+# TODO plot weights during training
+
+def experiment(train_trials:list[int], stim_length:int = 80, 
                training_trials_per_type:int = 10, noise_level:float = 0.1,
                feedback_rule:Literal['Hebbian', 'Anti-Hebbian'] = 'Hebbian'):
     '''
@@ -29,7 +33,7 @@ def experiment(train_trials:list[int], trial_length:int = 80,
     np.random.seed(2026)
     # HVA 0: border regions (Pyr 0 and Pyr 2), HVA 1: center region (Pyr 1)
     HVA_weights = get_hva_tuning([0.475, 0.475, 0.05], [0.05, 0.475, 0.475])
-    model = Minimal(HVA_tuning=HVA_weights, feedback_rule=feedback_rule)
+    model = Circuit(HVA_tuning=HVA_weights, feedback_rule=feedback_rule)
     
     trial_patterns = get_patterns() # Hardcoded trial patterns for testing
     trial_dict = get_trial_dict(*trial_patterns)
@@ -38,11 +42,11 @@ def experiment(train_trials:list[int], trial_length:int = 80,
     train_tensor = get_trial_type_minimal_data(trial_dict,
                                                trial_types=train_trials, 
                                                n_trials_per_type=10,
-                                               trial_length=trial_length,
+                                               stim_length=stim_length,
                                                noise_level=noise_level)
 
     # Test all trials before training
-    I_all_trials = get_minimal_data(*trial_patterns, n_trials=14, trial_length=trial_length, 
+    I_all_trials = get_minimal_data(*trial_patterns, n_trials=14, stim_length=stim_length, 
                                     to_tensor=True, noise_level=noise_level)
     activity_initial_all_trials = model(I_all_trials, train=False)
     plot_out(activity_initial_all_trials, I_all_trials, title='Model Activity Before Training', save=True)
@@ -59,8 +63,8 @@ if __name__ == "__main__":
     # test_minimal()
     # train on left-ish patterns (expect stimulus more on the left)
     # Hebbian feedback rule
-    experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, trial_length=100, training_trials_per_type=20, 
+    experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, stim_length=30, training_trials_per_type=20, 
                feedback_rule='Hebbian')
     # Anti-Hebbian feedback rule
-    # experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, trial_length=100, training_trials_per_type=20, 
-    #            feedback_rule='Anti-Hebbian')
+    experiment(train_trials=[1, 2, 6, 10, 11], noise_level=0.1, stim_length=30, training_trials_per_type=20, 
+               feedback_rule='Anti-Hebbian')
