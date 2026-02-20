@@ -1,9 +1,10 @@
+import torch.nn as nn
 # Fix this so it works as a dictionary
 basic = {
     "n_features": 2,
     "n_pv": 2,
     "n_context": 2,
-    "activation": None,
+    "activation": nn.ReLU(),
     "lr_ff": 0.01,
     "lr_fb": 0.01,
     "lr_lat": 0.01,
@@ -14,3 +15,5 @@ basic = {
     "weight_decay": 0.0,
     "seed": 42,
 }
+
+# TODO: different neuron types with different predicted trajectories
