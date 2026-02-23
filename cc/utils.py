@@ -30,6 +30,19 @@ class EMA(torch.nn.Module):
     def reset_state(self):
         self.ema = self.baseline.clone()
 
+
+class ThresholdReLU(torch.nn.Module):
+    '''
+    Thresholded ReLU activation function: f(x) = max(0, x - threshold)
+    '''
+    def __init__(self, threshold:float = 0.0):
+        super().__init__()
+        self.threshold = threshold
+    
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x - self.threshold, min=0.0)
+
+
 def nonnegative(x:torch.Tensor)->torch.Tensor:
     '''
     Performs x'= max(0, x) elementwise, ensuring all synaptic weights are non-negative.
@@ -63,9 +76,9 @@ def randn_reparam(size:tuple[int, ...], mu:float|Iterable, sigma:float|Iterable)
     if len(size) == 1:
         z = torch.randn(*size, *mu_shape)
     else:
-        assert mu_shape == (1,) and sigma_shape == (1,), "mu and sigma must be scalar if generating a random matrix."
+        assert ((mu_shape == (1,) or mu_shape == (size[1],)) and (sigma_shape == (1,) or sigma_shape == (size[1],)) , 
+                "mu and sigma must be scalar if generating a random matrix.")
         z = torch.randn(*size)
-    
     if (len(sigma_shape) == 1 and sigma_shape[0] == 1):
         sigma = sigma * torch.eye(z.shape[-1])
     elif len(sigma_shape) == 1:

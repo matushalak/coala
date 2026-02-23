@@ -3,25 +3,30 @@ import torch
 from pandas import DataFrame, concat as pd_concat
 from cc.minimal.minimal import CCNeuron
 from cc.minimal.utils import build_res, prepare_collect, collect_outputs
-from cc.minimal.config import basic
+from cc.minimal.config import *
 from cc.minimal.visualize import visualize_experiment_results
 from cc.utils import randn_reparam
 
 def design_experimental_phase(input_mean:torch.Tensor, input_var:torch.Tensor,
                               context_mean:torch.Tensor, context_var:torch.Tensor,
-                              n_steps:int = 100):
+                              n_steps:int = 100, n_trials:int | None = 10
+                              ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Example experiment stimulation for using the minimal CCNeuron model.
         Generates random input and context sequences.
     """
-    nzeros = 10
+    nzeros = n_steps // 2
     # Generate random input and context sequences according to provided distributions
     X = randn_reparam(size = (n_steps-nzeros,), mu = input_mean, sigma = input_var)
     C = randn_reparam(size = (n_steps-nzeros,), mu = context_mean, sigma = context_var)
     # append a few 0's to indicate initial state
     X = torch.cat((X.new_zeros((nzeros, *X.shape[1:])), X), dim=0)
     C = torch.cat((C.new_zeros((nzeros, *C.shape[1:])), C), dim=0)
-
+    
+    if n_trials is not None:
+        X = X.repeat((n_trials, 1))
+        C = C.repeat((n_trials, 1))
+    
     return [X, C] # Image consists of [X, C]
 
 def run_experimental_phase(model:CCNeuron, X:torch.Tensor, C:torch.Tensor,
@@ -41,9 +46,12 @@ def run_experimental_phase(model:CCNeuron, X:torch.Tensor, C:torch.Tensor,
         x, y, p, c = model(X[step], C[step])
         if update:
             model.update(x, y, p, c)
+            print('\n\nStep:', step, '\nw_ff:', model.w_ff.tolist(), '\nw_fb:', model.w_fb.tolist(), '\nw_lat:', model.w_lat.tolist(), '\nW_pv:', model.W_pv.tolist())
         
         # Collect the raw tensors
         data_collection = collect_outputs(step, x, y, p, c, model, data_collection)
+        if update: 
+            for item in data_collection[-4:]: print(item[-1]) 
     
     # Make data frame from collected data
     DF:DataFrame = build_res(data_collection, model)
@@ -55,14 +63,16 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
     model = CCNeuron(**model_config)
 
     # Image 1 ("familiar", trained on)
-    X1, C1 = design_experimental_phase(input_mean=[3,0], input_var = [1, 0.05],
-                                       context_mean=[-3,0], context_var=[1.5, 1.5],
+    X1, C1 = design_experimental_phase(input_mean=[3,0], input_var = [0.015, 0.0],
+                                       context_mean=[3,1], context_var=[0.015, 0.3],
                                        n_steps = n_steps_per_phase)
     # Image 2 ("novel", not trained on)
-    X2, C2 = design_experimental_phase(input_mean=[0,3], input_var=[0.05, 1],
-                                       context_mean=[0,-3], context_var=[1.5, 1.5],
+    X2, C2 = design_experimental_phase(input_mean=[0,3], input_var=[0.0, 0.015],
+                                       context_mean=[1,3], context_var=[0.3, 0.015],
                                        n_steps = n_steps_per_phase)
     O = torch.zeros_like(X1) # occlusion (no input)
+    
+    STIMULI = {'familiar': (X1, C1), 'novel': (X2, C2)}
 
     # Initial test on all images without updates
     DF1 = run_experimental_phase(model, X1, C1, condition_name='full_familiar_naive', update=False)
@@ -81,12 +91,12 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
 
     df = pd_concat([DF1, DF2, DFO1, DFO2, DF_training_familiar, DF_familiar, DF_novel, DFO_familiar, DFO_novel], ignore_index=True)
     df['seed'] = model_config['seed']
-    return df
+    return df, STIMULI
 
 
 if __name__ == "__main__":
     # Example usage
-    model_config = basic
-    df = run_experiment(model_config, n_steps_per_phase=200)
+    model_config = FB_x
+    df, STIMULI = run_experiment(model_config, n_steps_per_phase=200)
     # for now just return the long format dataframe for visualization
-    df = visualize_experiment_results(df)
+    df = visualize_experiment_results(df, STIMULI=STIMULI)

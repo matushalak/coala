@@ -18,16 +18,17 @@ def collect_outputs(step, x, y, p, c, model, collections):
     steps, ys, xs, ps, cs, w_ffs, w_fbs, w_lats, W_pvs = collections
     steps.append(step)
     ys.append(y.item())
-    xs.append(x.detach().numpy())
-    ps.append(p.detach().numpy())
-    cs.append(c.detach().numpy())
-    w_ffs.append(model.w_ff.detach().numpy())
-    w_fbs.append(model.w_fb.detach().numpy())
-    w_lats.append(model.w_lat.detach().numpy())
-    W_pvs.append(model.W_pv.detach().numpy())
-    return collections
+    # Snapshot immutable copies; avoid NumPy views to tensors that mutate in-place.
+    xs.append(x.detach().cpu().numpy().copy())
+    ps.append(p.detach().cpu().numpy().copy())
+    cs.append(c.detach().cpu().numpy().copy())
+    w_ffs.append(model.w_ff.detach().cpu().numpy().copy())
+    w_fbs.append(model.w_fb.detach().cpu().numpy().copy())
+    w_lats.append(model.w_lat.detach().cpu().numpy().copy())
+    W_pvs.append(model.W_pv.detach().cpu().numpy().copy())
+    return steps, ys, xs, ps, cs, w_ffs, w_fbs, w_lats, W_pvs
 
-def build_res(collections, model):
+def build_res(collections, model, debug=False):
     steps, ys, xs, ps, cs, w_ffs, w_fbs, w_lats, W_pvs = collections
     # Build results DataFrame once at the end
     res = {'step': steps, 'y': ys}
@@ -40,6 +41,8 @@ def build_res(collections, model):
     w_fbs = np.array(w_fbs)
     w_lats = np.array(w_lats)
     W_pvs = np.array(W_pvs)
+    
+    if debug: breakpoint()
     
     # Add all columns to results dict
     for i_in in range(model.n_features):
