@@ -1,0 +1,185 @@
+import argparse
+import os
+
+import torch
+import torch.nn.functional as F
+from torchvision.utils import make_grid, save_image
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint
+
+from cc.datasets.mnist import mnist
+from cc.masked_ae.sparse_cnn_unet import SparseCNNUNet
+
+
+class MAE(pl.LightningModule):
+    """
+    Bare-bones CNN masked autoencoder for 4-bit MNIST.
+    """
+
+    def __init__(self, num_filters: int, lr: float, mask_ratio: float, patch_size: int, masked_loss_weight: float):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = SparseCNNUNet(num_filters=num_filters)
+
+    def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
+        """
+        Random patch mask.
+        Returns keep-mask (True = visible/kept, False = masked).
+        """
+        b, _, h, w = imgs.shape
+        patch_size = self.hparams.patch_size
+        if h % patch_size != 0 or w % patch_size != 0:
+            raise ValueError(f"Image size ({h}, {w}) must be divisible by patch_size={patch_size}.")
+
+        ph, pw = h // patch_size, w // patch_size
+        num_patches = ph * pw
+        num_keep = max(1, int(round((1.0 - self.hparams.mask_ratio) * num_patches)))
+
+        noise = torch.rand(b, num_patches, device=imgs.device)
+        keep_idx = noise.argsort(dim=1)[:, :num_keep]
+        keep_patch = torch.zeros(b, num_patches, device=imgs.device, dtype=torch.bool)
+        keep_patch.scatter_(1, keep_idx, True)
+        keep_patch = keep_patch.view(b, 1, ph, pw)
+
+        keep_pixel = keep_patch.repeat_interleave(patch_size, dim=2).repeat_interleave(patch_size, dim=3)
+        return keep_pixel
+
+    def reconstruct(self, imgs: torch.Tensor, keep_mask: torch.BoolTensor | None = None) -> tuple[torch.Tensor, torch.BoolTensor]:
+        if keep_mask is None:
+            keep_mask = self._mask(imgs)
+        logits = self.model(imgs, keep_mask=keep_mask)
+        return logits, keep_mask
+
+    def _reconstruction_loss(self, logits: torch.Tensor, imgs: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+        targets = imgs.squeeze(1)
+        per_pixel_ce = F.cross_entropy(logits, targets, reduction="none")
+        masked_pixels = (~keep_mask.squeeze(1)).to(dtype=per_pixel_ce.dtype)
+        weights = torch.ones_like(per_pixel_ce) + masked_pixels * (self.hparams.masked_loss_weight - 1.0)
+
+        weighted = per_pixel_ce * weights
+        per_image = weighted.sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1e-8)
+        return per_image.mean()
+
+    def forward(self, imgs: torch.Tensor) -> torch.Tensor:
+        logits, keep_mask = self.reconstruct(imgs)
+        return self._reconstruction_loss(logits, imgs, keep_mask)
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+
+    def training_step(self, batch, batch_idx):
+        loss = self.forward(batch[0])
+        self.log("train_reconstruction_loss", loss, on_step=False, on_epoch=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss = self.forward(batch[0])
+        self.log("val_reconstruction_loss", loss)
+
+    def test_step(self, batch, batch_idx):
+        loss = self.forward(batch[0])
+        self.log("test_reconstruction_loss", loss)
+
+
+class ReconstructionCallback(pl.Callback):
+    """
+    Logs original / masked / reconstructed samples as a simple training sanity check.
+    """
+
+    def __init__(self, every_n_epochs: int = 5, num_images: int = 8, save_to_disk: bool = False):
+        super().__init__()
+        self.every_n_epochs = every_n_epochs
+        self.num_images = num_images
+        self.save_to_disk = save_to_disk
+        self._example_batch = None
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        if self._example_batch is None and batch_idx == 0:
+            self._example_batch = batch[0][:self.num_images].detach().cpu()
+
+    @torch.no_grad()
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if self._example_batch is None:
+            return
+        if (trainer.current_epoch + 1) % self.every_n_epochs != 0:
+            return
+
+        imgs = self._example_batch.to(pl_module.device)
+        logits, keep_mask = pl_module.reconstruct(imgs)
+        recon = torch.argmax(logits, dim=1, keepdim=True)
+
+        original = imgs.float() / 15.0
+        masked = (imgs * keep_mask).float() / 15.0
+        reconstructed = recon.float() / 15.0
+
+        panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
+        grid = make_grid(panel, nrow=self.num_images, normalize=True, value_range=(0, 1), pad_value=0.5)
+        epoch = trainer.current_epoch + 1
+        trainer.logger.experiment.add_image("MAE/original_masked_recon", grid, global_step=epoch)
+
+        if self.save_to_disk:
+            save_image(grid, os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_recon.png"))
+
+
+def train_mae(args):
+    os.makedirs(args.log_dir, exist_ok=True)
+    train_loader, val_loader, test_loader = mnist(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        root=args.data_dir,
+    )
+
+    recon_callback = ReconstructionCallback(save_to_disk=True)
+    save_callback = ModelCheckpoint(save_weights_only=True, mode="min", monitor="val_reconstruction_loss")
+    trainer = pl.Trainer(
+        default_root_dir=args.log_dir,
+        accelerator="auto",
+        max_epochs=args.epochs,
+        callbacks=[save_callback, recon_callback],
+        enable_progress_bar=args.progress_bar,
+    )
+    trainer.logger._default_hp_metric = None
+    if not args.progress_bar:
+        print(
+            "[INFO] The progress bar has been suppressed. For updates on the training "
+            f"progress, check the TensorBoard file at {trainer.logger.log_dir}. If you "
+            "want to see the progress bar, use the argparse option \"progress_bar\".\n"
+        )
+
+    pl.seed_everything(args.seed)
+    model = MAE(
+        num_filters=args.num_filters,
+        lr=args.lr,
+        mask_ratio=args.mask_ratio,
+        patch_size=args.patch_size,
+        masked_loss_weight=args.masked_loss_weight,
+    )
+
+    trainer.fit(model, train_loader, val_loader)
+
+    model = MAE.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+    return trainer.test(model, dataloaders=test_loader, verbose=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument("--num_filters", default=32, type=int, help="Number of channels/filters to use.")
+    parser.add_argument("--mask_ratio", default=0.5, type=float, help="Fraction of patches to hide.")
+    parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
+    parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels in CE.")
+
+    parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate to use.")
+    parser.add_argument("--batch_size", default=128, type=int, help="Minibatch size.")
+
+    parser.add_argument("--data_dir", default="../data/", type=str, help="Directory where to look for the data.")
+    parser.add_argument("--epochs", default=80, type=int, help="Max number of epochs.")
+    parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
+    parser.add_argument("--num_workers",default=10,type=int,
+                        help=("Number of workers to use in data loaders. For strict determinism set this to 0."),)
+    parser.add_argument("--log_dir", default="MAE_logs", type=str, help="Directory for PyTorch Lightning logs.")
+    parser.add_argument("--progress_bar",action="store_true",
+        help=("Use a progress bar indicator for interactive experimentation. Not to be used with SLURM jobs."),)
+
+    args = parser.parse_args()
+    train_mae(args)
