@@ -30,11 +30,11 @@ class CCNeuron(nn.Module):
         n_context: int = 2,
         activation: nn.Module | None = None,
         lr_ff: float = 0.01,
-        w_ff_init:dict = {'mu': 0.5, 'sigma': 1e-2},
+        w_ff_init:dict = {'mu': [0.5, 0.5], 'sigma': 1e-2},
         lr_fb: float = 0.01,
-        w_fb_init:dict = {'mu': 0.1, 'sigma': 1e-2},
+        w_fb_init:dict = {'mu': [0.1, 0.1], 'sigma': 1e-2},
         lr_lat: float = 0.01,
-        w_lat_init:dict = {'mu': 0.2, 'sigma': 1e-2},
+        w_lat_init:dict = {'mu': [0.2, 0.2], 'sigma': 1e-2},
         lr_pv: float = 0.01,
         W_pv_init:dict = {'mu': ([0.1, 0.1], [0.1,0.1]), 'sigma': [1e-2, 1e-2]},
         pyc_decay:float = 0.1,
@@ -57,12 +57,12 @@ class CCNeuron(nn.Module):
         self.activation = activation if activation is not None else nn.ReLU()
 
         # Learnable weights updated manually via local rules
-        self.w_ff = randn_reparam(size=(n_features,), **w_ff_init)
-        self.w_fb = randn_reparam(size=(n_context,), **w_fb_init)
-        self.w_lat = randn_reparam(size=(n_pv,), **w_lat_init)
+        self.w_ff = nonnegative(randn_reparam(size=(1,), **w_ff_init))
+        self.w_fb = nonnegative(randn_reparam(size=(1,), **w_fb_init))
+        self.w_lat = nonnegative(randn_reparam(size=(1,), **w_lat_init))
         self.W_pv = torch.cat((
-            randn_reparam(size=(1,), mu = W_pv_init['mu'][0],sigma = W_pv_init['sigma'][0]).unsqueeze(0),
-            randn_reparam(size=(1,), mu = W_pv_init['mu'][1],sigma = W_pv_init['sigma'][1]).unsqueeze(0)), 
+            nonnegative(randn_reparam(size=(1,), mu = W_pv_init['mu'][0],sigma = W_pv_init['sigma'][0])).unsqueeze(0),
+            nonnegative(randn_reparam(size=(1,), mu = W_pv_init['mu'][1],sigma = W_pv_init['sigma'][1])).unsqueeze(0)), 
                              dim=0)
         # Hyperpatameters
         self.lr_ff = lr_ff
@@ -83,10 +83,6 @@ class CCNeuron(nn.Module):
         self.w_lat_baseline = self.w_lat.detach().clone()
         self.W_pv_baseline = self.W_pv.detach().clone()
 
-        # self.w_ff_ema = EMA(shape=(n_features,), alpha=weight_decay, baseline=self.w_ff_baseline)
-        # self.w_fb_ema = EMA(shape=(n_context,), alpha=weight_decay, baseline=self.w_fb_baseline)
-        # self.w_lat_ema = EMA(shape=(n_pv,), alpha=weight_decay, baseline=self.w_lat_baseline)
-        # self.W_pv_ema = EMA(shape=(n_pv, n_features), alpha=weight_decay, baseline=self.W_pv_baseline)
 
     def forward(self, x: torch.Tensor, c: torch.Tensor
                 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -100,11 +96,11 @@ class CCNeuron(nn.Module):
         """
         assert x.shape == (self.n_features,) and c.shape == (self.n_context,)
 
-        p = self.pv(self.activation(nonnegative(self.W_pv) @ x)) # feedforward excitation to PV neurons
+        p = self.pv(self.activation(self.W_pv @ x)) # feedforward excitation to PV neurons
         y = self.pyramidal(self.activation(
-            torch.dot(nonnegative(self.w_ff), x) # feedforward excitation
-            + torch.dot(nonnegative(self.w_fb), c) # feedback excitation
-            - torch.dot(nonnegative(self.w_lat), p) # "lateral" inhibition 
+            torch.dot(self.w_ff, x) # feedforward excitation
+            + torch.dot(self.w_fb, c) # feedback excitation
+            - torch.dot(self.w_lat, p) # "lateral" inhibition 
                             )) 
         
         return x, y, p, c
@@ -141,6 +137,12 @@ class CCNeuron(nn.Module):
             self.w_fb -= (self.w_fb - self.w_fb_baseline) * self.weight_decay
             self.w_lat -= (self.w_lat - self.w_lat_baseline) * self.weight_decay
             self.W_pv -= (self.W_pv - self.W_pv_baseline) * self.weight_decay
+        
+        # Ensure non-negativity of weights
+        self.w_ff = nonnegative(self.w_ff)
+        self.w_fb = nonnegative(self.w_fb)
+        self.w_lat = nonnegative(self.w_lat)
+        self.W_pv = nonnegative(self.W_pv)
 
 
     def _reset_state(self):

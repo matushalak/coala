@@ -12,8 +12,8 @@ from cc.figures import FigureBuilder
 def visualize_experiment_results(DF:DataFrame, STIMULI:dict[str, tuple[torch.Tensor, torch.Tensor]], 
                                  save_path:str = PLOTSDIR, name:str = None)->DataFrame:
     long_df = wide_to_long(DF)
-    DF.to_csv(os.path.join(save_path, f"experiment_results_wide_{name}.csv"), index=False)   
-    long_df.to_csv(os.path.join(save_path, f"experiment_results_long_{name}.csv"), index=False)
+    # DF.to_csv(os.path.join(save_path, f"experiment_results_wide_{name}.csv"), index=False)   
+    # long_df.to_csv(os.path.join(save_path, f"experiment_results_long_{name}.csv"), index=False)
     visualize_naive_expert_results(long_df, STIMULI=STIMULI, save_path=save_path, name=name)
     return long_df
 

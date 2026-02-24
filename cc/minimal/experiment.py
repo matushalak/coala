@@ -46,12 +46,12 @@ def run_experimental_phase(model:CCNeuron, X:torch.Tensor, C:torch.Tensor,
         x, y, p, c = model(X[step], C[step])
         if update:
             model.update(x, y, p, c)
-            print('\n\nStep:', step, '\nw_ff:', model.w_ff.tolist(), '\nw_fb:', model.w_fb.tolist(), '\nw_lat:', model.w_lat.tolist(), '\nW_pv:', model.W_pv.tolist())
+            # print('\n\nStep:', step, '\nw_ff:', model.w_ff.tolist(), '\nw_fb:', model.w_fb.tolist(), '\nw_lat:', model.w_lat.tolist(), '\nW_pv:', model.W_pv.tolist())
         
         # Collect the raw tensors
         data_collection = collect_outputs(step, x, y, p, c, model, data_collection)
-        if update: 
-            for item in data_collection[-4:]: print(item[-1]) 
+        # if update: 
+        #     for item in data_collection[-4:]: print(item[-1]) 
     
     # Make data frame from collected data
     DF:DataFrame = build_res(data_collection, model)
@@ -95,8 +95,9 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
 
 
 if __name__ == "__main__":
-    # Example usage
-    model_config = FB_x
-    df, STIMULI = run_experiment(model_config, n_steps_per_phase=200)
-    # for now just return the long format dataframe for visualization
-    df = visualize_experiment_results(df, STIMULI=STIMULI)
+    for cfg_name, cfg in minimal_configs.items():
+        print(f"Running experiment for config: {cfg_name}")
+        df, STIMULI = run_experiment(cfg, n_steps_per_phase=300)
+        # for now just return the long format dataframe for visualization
+        df = visualize_experiment_results(df, STIMULI=STIMULI,
+                                          name=cfg_name)
