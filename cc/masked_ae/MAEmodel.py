@@ -13,13 +13,25 @@ from cc.masked_ae.sparse_cnn_unet import SparseCNNUNet
 
 class MAE(pl.LightningModule):
     """
-    Bare-bones CNN masked autoencoder for 4-bit MNIST.
+    Bare-bones CNN masked autoencoder for normalized images.
     """
 
-    def __init__(self, num_filters: int, lr: float, mask_ratio: float, patch_size: int, masked_loss_weight: float):
+    def __init__(
+        self,
+        num_filters: int,
+        lr: float,
+        mask_ratio: float,
+        patch_size: int,
+        masked_loss_weight: float,
+        num_input_channels: int = 1,
+    ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = SparseCNNUNet(num_filters=num_filters)
+        self.model = SparseCNNUNet(
+            num_input_channels=num_input_channels,
+            num_output_channels=num_input_channels,
+            num_filters=num_filters,
+        )
 
     def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
         """
@@ -27,42 +39,43 @@ class MAE(pl.LightningModule):
         Returns keep-mask (True = visible/kept, False = masked).
         """
         b, _, h, w = imgs.shape
-        patch_size = self.hparams.patch_size
+        patch_size = self.hparams.patch_size # define (square) patch size on pixel-level (eg. 4x4 px)
         if h % patch_size != 0 or w % patch_size != 0:
             raise ValueError(f"Image size ({h}, {w}) must be divisible by patch_size={patch_size}.")
 
-        ph, pw = h // patch_size, w // patch_size
-        num_patches = ph * pw
-        num_keep = max(1, int(round((1.0 - self.hparams.mask_ratio) * num_patches)))
+        ph, pw = h // patch_size, w // patch_size # number of patches along height and width
+        num_patches = ph * pw # total number of patches in the image
+        num_keep = max(1, int(round((1.0 - self.hparams.mask_ratio) * num_patches))) # number of unmasked patches
 
         noise = torch.rand(b, num_patches, device=imgs.device)
         keep_idx = noise.argsort(dim=1)[:, :num_keep]
         keep_patch = torch.zeros(b, num_patches, device=imgs.device, dtype=torch.bool)
         keep_patch.scatter_(1, keep_idx, True)
         keep_patch = keep_patch.view(b, 1, ph, pw)
-
         keep_pixel = keep_patch.repeat_interleave(patch_size, dim=2).repeat_interleave(patch_size, dim=3)
         return keep_pixel
 
-    def reconstruct(self, imgs: torch.Tensor, keep_mask: torch.BoolTensor | None = None) -> tuple[torch.Tensor, torch.BoolTensor]:
+    def reconstruct(
+        self,
+        imgs: torch.Tensor,
+        keep_mask: torch.BoolTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.BoolTensor]:
         if keep_mask is None:
             keep_mask = self._mask(imgs)
-        logits = self.model(imgs, keep_mask=keep_mask)
-        return logits, keep_mask
+        recon = self.model(imgs, keep_mask=keep_mask)
+        return recon, keep_mask
 
-    def _reconstruction_loss(self, logits: torch.Tensor, imgs: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
-        targets = imgs.squeeze(1)
-        per_pixel_ce = F.cross_entropy(logits, targets, reduction="none")
-        masked_pixels = (~keep_mask.squeeze(1)).to(dtype=per_pixel_ce.dtype)
-        weights = torch.ones_like(per_pixel_ce) + masked_pixels * (self.hparams.masked_loss_weight - 1.0)
-
-        weighted = per_pixel_ce * weights
+    def _reconstruction_loss(self, recon: torch.Tensor, imgs: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+        per_pixel_mse = (recon - imgs).pow(2).mean(dim=1)
+        masked_pixels = (~keep_mask.squeeze(1)).to(dtype=per_pixel_mse.dtype)
+        weights = torch.ones_like(per_pixel_mse) + masked_pixels * (self.hparams.masked_loss_weight - 1.0)
+        weighted = per_pixel_mse * weights
         per_image = weighted.sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1e-8)
         return per_image.mean()
 
     def forward(self, imgs: torch.Tensor) -> torch.Tensor:
-        logits, keep_mask = self.reconstruct(imgs)
-        return self._reconstruction_loss(logits, imgs, keep_mask)
+        recon, keep_mask = self.reconstruct(imgs)
+        return self._reconstruction_loss(recon, imgs, keep_mask)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
@@ -105,15 +118,18 @@ class ReconstructionCallback(pl.Callback):
             return
 
         imgs = self._example_batch.to(pl_module.device)
-        logits, keep_mask = pl_module.reconstruct(imgs)
-        recon = torch.argmax(logits, dim=1, keepdim=True)
+        recon, keep_mask = pl_module.reconstruct(imgs)
 
-        original = imgs.float() / 15.0
-        masked = (imgs * keep_mask).float() / 15.0
-        reconstructed = recon.float() / 15.0
+        original = imgs.float()
+        grey = 0.5 * (
+            imgs.amin(dim=(2, 3), keepdim=True) +
+            imgs.amax(dim=(2, 3), keepdim=True)
+        )
+        masked = torch.where(keep_mask, imgs, grey).float()
+        reconstructed = recon.float()
 
         panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
-        grid = make_grid(panel, nrow=self.num_images, normalize=True, value_range=(0, 1), pad_value=0.5)
+        grid = make_grid(panel, nrow=self.num_images, normalize=True, pad_value=0.5)
         epoch = trainer.current_epoch + 1
         trainer.logger.experiment.add_image("MAE/original_masked_recon", grid, global_step=epoch)
 
@@ -153,6 +169,7 @@ def train_mae(args):
         mask_ratio=args.mask_ratio,
         patch_size=args.patch_size,
         masked_loss_weight=args.masked_loss_weight,
+        num_input_channels=args.num_input_channels,
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -167,13 +184,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_filters", default=32, type=int, help="Number of channels/filters to use.")
     parser.add_argument("--mask_ratio", default=0.5, type=float, help="Fraction of patches to hide.")
     parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
-    parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels in CE.")
+    parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels in MSE.")
+    parser.add_argument("--num_input_channels", default=1, type=int,
+                        help="Number of image channels (1 for MNIST/FashionMNIST, 3 for CIFAR/SVHN).")
 
     parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate to use.")
     parser.add_argument("--batch_size", default=128, type=int, help="Minibatch size.")
 
     parser.add_argument("--data_dir", default="../data/", type=str, help="Directory where to look for the data.")
-    parser.add_argument("--epochs", default=80, type=int, help="Max number of epochs.")
+    parser.add_argument("--epochs", default=21, type=int, help="Max number of epochs.")
     parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
     parser.add_argument("--num_workers",default=10,type=int,
                         help=("Number of workers to use in data loaders. For strict determinism set this to 0."),)

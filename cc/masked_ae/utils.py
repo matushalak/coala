@@ -22,14 +22,8 @@ def visualize_manifold(decoder, grid_size=20):
     # reformat to collapse grid to one batch and match latent dimensionality
     zgrid = torch.stack([z1grid.flatten(), z2grid.flatten()], dim=1) # (grid**2, 2)
     # can pass to decoder (B=grid**2, zdim = 2)
-    logits = decoder(zgrid) # (grid**2, 2) => (grid**2, 16, 28, 28)
-    probs = torch.softmax(logits, dim = 1)
-    # compute output means
-    values = torch.arange(16)
-    output_means = probs * values[None, :, None, None]
-    output_means = output_means.sum(dim = 1).float().unsqueeze(1)
-    output_means /= 15
+    output_means = decoder(zgrid).float()
     # make grid with torchvision make_grid
-    img_grid = make_grid(output_means, nrow=grid_size, padding=0, normalize=True, value_range=(0,1))
+    img_grid = make_grid(output_means, nrow=grid_size, padding=0, normalize=True)
 
     return img_grid

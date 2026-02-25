@@ -49,13 +49,13 @@ class CNNEncoder(nn.Module):
     def forward(self, x):
         """
         Inputs:
-            x - Input batch with images of shape [B,C,H,W] of type long with values between 0 and 15.
+            x - Input batch with normalized images of shape [B,C,H,W].
         Outputs:
             mean - Tensor of shape [B,z_dim] representing the predicted mean of the latent distributions.
             log_std - Tensor of shape [B,z_dim] representing the predicted log standard deviation
                       of the latent distributions.
         """
-        x = x.float() / 15 * 2.0 - 1.0  # Move images between -1 and 1
+        x = x.float()
         # run batch of images through network
         latent_params = self.encoder(x) # (B, z_dim)
         mean = latent_params[..., :self.z_dim] # (B, z_dim)
@@ -85,13 +85,13 @@ class ResidualConv2d(nn.Module):
 
 class CNNDecoder(nn.Module):
     def __init__(self, 
-                 num_input_channels: int = 16, 
+                 num_input_channels: int = 1, 
                  num_filters: int = 32,
                  z_dim: int = 20):
         """Decoder with a CNN network.
         Inputs:
             num_input_channels - Number of channels of the image to
-                                 reconstruct. For a 4-bit MNIST, this parameter is 16
+                                 reconstruct.
             num_filters - Number of filters we use in the last convolutional
                           layers. Early layers might use a duplicate of it.
             z_dim - Dimensionality of latent representation z
@@ -131,14 +131,11 @@ class CNNDecoder(nn.Module):
             z - Latent vector of shape [B,z_dim]
         Outputs:
             x - Prediction of the reconstructed image based on z.
-                This should be a logit output *without* a softmax applied on it.
                 Shape: [B,num_input_channels,28,28]
         """
         x = self.expand(z) # (B, 20) => (B, 16*2*32)
         x = x.reshape(x.shape[0], -1, 4, 4) # (B, 16*2*32) => (B, 2*32, 4, 4)
-        # get logits for all possible 4-bit values for each pixel in x
-        # by passing (reshaped) latents (z) through decoder
-        x = self.decoder(x) # (B, 2*32, 4, 4) => (B, 16, 28, 28)
+        x = self.decoder(x) # (B, 2*32, 4, 4) => (B, C, 28, 28)
         return x
 
     @property

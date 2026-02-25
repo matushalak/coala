@@ -1,9 +1,7 @@
 import argparse
 import os
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.utils import make_grid, save_image
 import pytorch_lightning as pl
@@ -15,7 +13,7 @@ from cc.masked_ae.utils import visualize_manifold
 
 class AE(pl.LightningModule):
 
-    def __init__(self, num_filters, z_dim, lr):
+    def __init__(self, num_filters, z_dim, lr, num_input_channels=1):
         """
         PyTorch Lightning module that summarizes all components to train a VAE.
         Inputs:
@@ -26,26 +24,22 @@ class AE(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.zdim = z_dim
-        self.encoder = CNNEncoder(z_dim=z_dim, num_filters=num_filters)
-        self.decoder = CNNDecoder(z_dim=z_dim, num_filters=num_filters)
+        self.encoder = CNNEncoder(z_dim=z_dim, num_filters=num_filters, num_input_channels=num_input_channels)
+        self.decoder = CNNDecoder(z_dim=z_dim, num_filters=num_filters, num_input_channels=num_input_channels)
 
     def forward(self, imgs):
         """
         The forward function calculates the AE-loss for a given batch of images.
         Inputs:
-            imgs - Batch of images of shape [B,C,H,W].
-                   The input images are converted to 4-bit, i.e. integers between 0 and 15.
+            imgs - Batch of normalized images of shape [B,C,H,W].
         Ouptuts:
             L_rec - The average reconstruction loss of the batch. Shape: single scalar
         """
-        b, c, h, w = imgs.shape
         # obtain latent representation from encoder
         z = self.encoder(imgs)
-        # obtain logits from decoder
-        logits = self.decoder(z)
-        # reconstruction loss: obtain negative log likelihood by summing over CE over all pixels and possible values
-        # sum over pixels, average over batch
-        L_rec = F.cross_entropy(logits.view(b, -1, h*w), imgs.view(b, h*w), reduction= 'none').sum(axis = -1).mean()
+        # obtain reconstruction from decoder
+        recon = self.decoder(z)
+        L_rec = F.mse_loss(recon, imgs)
         return L_rec
 
     @torch.no_grad()
@@ -55,21 +49,18 @@ class AE(pl.LightningModule):
         Inputs:
             batch_size - Number of images to generate
         Outputs:
-            x_samples - Sampled, 4-bit images. Shape: [B,C,H,W]
+            x_samples - Sampled reconstructed images. Shape: [B,C,H,W]
         """
         # sample from standard normal
         z_samples = torch.randn((batch_size, self.zdim), device=self.decoder.device)
-        # pass through decoder to obtain logits
-        logits = self.decoder(z_samples)
-        # obtain pixel values by taking argmax over logits
-        x_samples = torch.argmax(logits, dim=1, keepdim=True)
+        # pass through decoder to obtain reconstructed samples
+        x_samples = self.decoder(z_samples)
         return x_samples
     
     @torch.no_grad()
     def reconstruct_samples(self, imgs):
         z = self.encoder(imgs)
-        logits = self.decoder(z)
-        return torch.argmax(logits, dim=1, keepdim=True)
+        return self.decoder(z)
 
     def configure_optimizers(self):
         # Create optimizer
@@ -128,8 +119,7 @@ class GenerateCallback(pl.Callback):
             epoch - The epoch number to use for TensorBoard logging and saving of the files.
         """
         samples = pl_module.sample(self.batch_size)
-        samples = samples.float() / 15  # Converting 4-bit images to values between 0 and 1
-        grid = make_grid(samples, nrow=8, normalize=True, value_range=(0, 1), pad_value=0.5)
+        grid = make_grid(samples, nrow=8, normalize=True, pad_value=0.5)
         grid = grid.detach().cpu()
         trainer.logger.experiment.add_image("Samples", grid, global_step=epoch)
         if self.save_to_disk:
@@ -165,11 +155,11 @@ class GenerateCallback(pl.Callback):
         imgs = imgs.to(pl_module.device)
         recon = pl_module.reconstruct_samples(imgs)
 
-        originals = imgs.float() / 15
-        reconstructions = recon.float() / 15
+        originals = imgs.float()
+        reconstructions = recon.float()
         paired = torch.stack((originals, reconstructions), dim=1).flatten(0, 1).detach().cpu()
         nrow = max(2, 2 * min(8, originals.shape[0]))
-        grid = make_grid(paired, nrow=nrow, normalize=True, value_range=(0, 1), pad_value=0.5)
+        grid = make_grid(paired, nrow=nrow, normalize=True, pad_value=0.5)
 
         trainer.logger.experiment.add_image("Reconstructions", grid, global_step=epoch)
         if self.save_to_disk:
@@ -207,7 +197,8 @@ def train_ae(args):
     pl.seed_everything(args.seed)  # To be reproducible
     model = AE(num_filters=args.num_filters,
                 z_dim=args.z_dim,
-                lr=args.lr)
+                lr=args.lr,
+                num_input_channels=args.num_input_channels)
 
     # Training
     gen_callback.sample_and_save(trainer, model, epoch=0)  # Initial sample
@@ -238,6 +229,8 @@ if __name__ == '__main__':
                         help='Dimensionality of latent space')
     parser.add_argument('--num_filters', default=32, type=int,
                         help='Number of channels/filters to use in the CNN encoder/decoder.')
+    parser.add_argument('--num_input_channels', default=1, type=int,
+                        help='Number of image channels to reconstruct (1 for MNIST/FashionMNIST, 3 for CIFAR/SVHN).')
 
     # Optimizer hyperparameters
     parser.add_argument('--lr', default=1e-3, type=float,
@@ -248,7 +241,7 @@ if __name__ == '__main__':
     # Other hyperparameters
     parser.add_argument('--data_dir', default='../data/', type=str,
                         help='Directory where to look for the data. For jobs on Lisa, this should be $TMPDIR.')
-    parser.add_argument('--epochs', default=80, type=int,
+    parser.add_argument('--epochs', default=21, type=int,
                         help='Max number of epochs')
     parser.add_argument('--seed', default=42, type=int,
                         help='Seed to use for reproducing results')
