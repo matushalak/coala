@@ -6,9 +6,7 @@ from torchvision.utils import save_image
 
 from mnist import combine_grayscale_levels_mnist, mnist
 from train_pl import VAE
-from utils import visualize_reconstructions
-
-from sklearn.decomposition import PCA
+from utils import visualize_reconstructions, map_high_dimensional_latent_reconstructions_to_Nd
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -92,7 +90,8 @@ def build_custom_loaders(base_test_loader, n_grayscale_levels, level_specs):
 
 def main(args):
     checkpoint_path = resolve_checkpoint_path(args.logs_root, args.run_subdir, args.checkpoint_name)
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu 
+                          else ("mps" if not torch.backends.mps.is_available() else "cpu"))
     model = VAE.load_from_checkpoint(str(checkpoint_path), map_location=device)
     model.to(device)
     model.eval()
@@ -117,6 +116,9 @@ def main(args):
         out_path = output_dir / f"recon_{loader_name}.png"
         save_image(grid, str(out_path), normalize=False)
         print(f"Saved: {out_path}")
+
+    combined_test_loader  = combine_grayscale_levels_mnist(base_test_loader, n_grayscale_levels=args.n_grayscale_levels)
+    map_high_dimensional_latent_reconstructions_to_Nd(model, combined_test_loader)
 
 
 if __name__ == "__main__":

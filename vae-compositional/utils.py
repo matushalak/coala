@@ -210,3 +210,62 @@ def visualize_reconstructions(model, data_loader, n_images=12):
     img_grid = make_grid(paired_images, nrow=2, padding=2, normalize=False)
 
     return img_grid
+
+def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int = 3):
+    from tqdm import tqdm
+    latents = []
+    labels = []
+
+    # Collect latents and labels for the whole test set
+    for i, (imgs, (digit_lbls, color_lbls)) in enumerate(tqdm(test_loader, desc="Collecting latents and labels")):
+        if i % 500 == 0:
+            continue  # Skip some batches to reduce computation for large test sets
+            
+        images = imgs.to(model.device) # (B,C,H,W)
+        b, c, h, w = images.shape
+        # obtain variational distribution parameters (mu, log(std))
+        mean, logstd = model.encoder(images)
+        # sample in latent space using mu, std
+        z = sample_reparameterize(mean, torch.exp(logstd))
+        latents.append(z)
+        labels.append(torch.cat([digit_lbls[:, None], color_lbls[:, None]], dim=1))  # (B, 2) with digit and color labels
+    
+    # Turn into big tensors
+    latents = torch.cat(latents, dim=0).detach().cpu().numpy()
+    labels = torch.cat(labels, dim=0).detach().cpu().numpy()
+
+    # Turn 2d labels into a single label for coloring (e.g., digit*10 + color)
+    labels = labels[:, 0] * 10 + labels[:, 1]
+
+    # Use PCA to reduce to Nd dimensions
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=Nd)
+    latents_Nd = pca.fit_transform(latents)
+    
+    if Nd == 2:
+        # For 2D, we can visualize the latent space with a scatter plot
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(8, 6))
+        scatter = plt.scatter(latents_Nd[:, 0], latents_Nd[:, 1], c=labels, cmap='viridis', alpha=0.7)
+        plt.colorbar(scatter, ticks=np.unique(labels))
+        plt.title('2D PCA of Latent Space')
+        plt.xlabel('Principal Component 1')
+        plt.ylabel('Principal Component 2')
+        plt.grid()
+        plt.show()
+    
+    if Nd == 3:
+        # For 3D, we can visualize the latent space with a 3D scatter plot
+        from mpl_toolkits.mplot3d import Axes3D
+        import matplotlib.pyplot as plt
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        scatter = ax.scatter(latents_Nd[:, 0], latents_Nd[:, 1], latents_Nd[:, 2], c=labels, cmap='viridis', alpha=0.7)
+        fig.colorbar(scatter, ticks=np.unique(labels))
+        ax.set_title('3D PCA of Latent Space')
+        ax.set_xlabel('Principal Component 1')
+        ax.set_ylabel('Principal Component 2')
+        ax.set_zlabel('Principal Component 3')
+        plt.show()
+    
+    return latents_Nd, labels
