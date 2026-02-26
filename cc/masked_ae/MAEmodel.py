@@ -24,6 +24,7 @@ class MAE(pl.LightningModule):
         patch_size: int,
         masked_loss_weight: float,
         num_input_channels: int = 1,
+        decoder_densify_mode: str = "random",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -31,6 +32,7 @@ class MAE(pl.LightningModule):
             num_input_channels=num_input_channels,
             num_output_channels=num_input_channels,
             num_filters=num_filters,
+            decoder_densify_mode=decoder_densify_mode,
         )
 
     def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
@@ -170,6 +172,7 @@ def train_mae(args):
         patch_size=args.patch_size,
         masked_loss_weight=args.masked_loss_weight,
         num_input_channels=args.num_input_channels,
+        decoder_densify_mode=args.decoder_densify_mode,
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -185,6 +188,13 @@ if __name__ == "__main__":
     parser.add_argument("--mask_ratio", default=0.5, type=float, help="Fraction of patches to hide.")
     parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
     parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels in MSE.")
+    parser.add_argument(
+        "--decoder_densify_mode",
+        default="random",
+        choices=("random", "token", "zero"),
+        type=str,
+        help="How sparse encoder features are filled before decoder local processing.",
+    )
     parser.add_argument("--num_input_channels", default=1, type=int,
                         help="Number of image channels (1 for MNIST/FashionMNIST, 3 for CIFAR/SVHN).")
 

@@ -1,4 +1,5 @@
-# Simple U-Net implementation
+# Simple "U-Net" implementation 
+# (bottleneck autoencoder without skip connections between enc. and dec.)
 import torch.nn as nn
 
 class CNNEncoder(nn.Module):
