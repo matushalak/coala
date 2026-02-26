@@ -171,19 +171,27 @@ def train_vae(args):
     #                                                num_workers=args.num_workers,
     #                                                root=args.data_dir)
     
-    # combined_train_loader  = combine_mnist_inverse_mnist(train_loader, i_train_loader, mnist_digits=[0,1,2,4,6,8], inverse_mnist_digits=[1,3,5,7,8,9])
+    # combined_train_loader  = combine_mnist_inverse_mnist(train_loader, i_train_loader, 
+    #                                                      mnist_digits=[0,1,2,4,6,8], inverse_mnist_digits=[1,3,5,7,8,9])
     # combined_val_loader  = combine_mnist_inverse_mnist(val_loader, i_val_loader)
     # combined_test_loader  = combine_mnist_inverse_mnist(test_loader, i_test_loader)
     
     # Combination of multiple grayscale levels of MNIST
     combined_train_loader  = combine_grayscale_levels_mnist(
         train_loader, n_grayscale_levels=6, 
-        level_0_digits=[0,1,2,3,4,5,6,7,8,9],
-        level_1_digits=[0,1,2,3,4,5,6,7,8,9],
-        level_2_digits=[1,2,3,4,5,6,7,8,9],
-        level_3_digits=[0,1,2,3,4,5,6,7,8,9],
-        level_4_digits=[0,1,2,3,4,5,6,7,8,9],
-        level_5_digits=[0,1,2,3,4,5,6,7,8,9])
+        level_0_digits=[0,1,2,3,5,6,7,8,9], # no 4
+        level_1_digits=[0,1,2,4,5,6,7,8,9], # no 3
+        level_2_digits=[1,2,3,4,5,6,7,8,9], # no 0
+        level_3_digits=[0,1,2,3,4,5,6,7,9], # no 8
+        level_4_digits=[0,2,3,4,5,6,7,8,9], # no 1
+        level_5_digits=[0,1,2,3,4,5,6,7,8]) # no 9
+    
+    # combined_train_loader  = combine_grayscale_levels_mnist(
+    #     train_loader, n_grayscale_levels=4, 
+    #     level_0_digits=[0,1],
+    #     level_1_digits=[1,6],
+    #     level_2_digits=[6,2],
+    #     level_3_digits=[2,3])
     
     combined_val_loader  = combine_grayscale_levels_mnist(val_loader, n_grayscale_levels=6)
     combined_test_loader  = combine_grayscale_levels_mnist(test_loader, n_grayscale_levels=6)
@@ -240,8 +248,8 @@ if __name__ == '__main__':
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     # Model hyperparameters
-    parser.add_argument('--z_dim', default=3, type=int,
-                        help='Dimensionality of latent space')
+    parser.add_argument('--z_dim', default=64, type=int,
+                        help='Dimensionality of latent space (note: big latent harder to visualize but performs better)')
     parser.add_argument('--num_filters', default=64, type=int,
                         help='Number of channels/filters to use in the CNN encoder/decoder.')
 
@@ -254,7 +262,7 @@ if __name__ == '__main__':
     # Other hyperparameters
     parser.add_argument('--data_dir', default='../data/', type=str,
                         help='Directory where to look for the data. For jobs on Lisa, this should be $TMPDIR.')
-    parser.add_argument('--epochs', default=20, type=int,
+    parser.add_argument('--epochs', default=20, type=int, # very few epochs: TODO more for better performance
                         help='Max number of epochs')
     parser.add_argument('--seed', default=42, type=int,
                         help='Seed to use for reproducing results')
