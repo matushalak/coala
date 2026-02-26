@@ -19,9 +19,9 @@ from torchvision import transforms
 import torch
 import torch.utils.data as data
 from torch.utils.data import random_split
+from cc import DATADIR
 
-
-def cifar10(root="../data", batch_size=128, num_workers=4, download=True):
+def cifar10(root=DATADIR, batch_size=128, num_workers=4, download=True):
     """
     Returns data loaders for normalized CIFAR-10.
 
