@@ -148,7 +148,7 @@ class SparseCNNEncoder(nn.Module):
         mask4 = downsample_center_mask(mask7, (4, 4), stride=2)
         x4 = self.down7_to_4(x7, mask4)
         x4 = self.local4(x4, mask4)
-
+        breakpoint()
         return {
             "feat14": x14,
             "feat7": x7,
