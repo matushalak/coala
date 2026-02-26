@@ -211,16 +211,16 @@ def visualize_reconstructions(model, data_loader, n_images=12):
 
     return img_grid
 
-def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int = 3):
+def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int = 2):
     from tqdm import tqdm
     latents = []
     labels = []
 
     # Collect latents and labels for the whole test set
     for i, (imgs, (digit_lbls, color_lbls)) in enumerate(tqdm(test_loader, desc="Collecting latents and labels")):
-        if i % 500 == 0:
+        if i % 2 == 0 or i % 3 == 0:
             continue  # Skip some batches to reduce computation for large test sets
-            
+
         images = imgs.to(model.device) # (B,C,H,W)
         b, c, h, w = images.shape
         # obtain variational distribution parameters (mu, log(std))
@@ -235,7 +235,7 @@ def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int
     labels = torch.cat(labels, dim=0).detach().cpu().numpy()
 
     # Turn 2d labels into a single label for coloring (e.g., digit*10 + color)
-    labels = labels[:, 0] * 10 + labels[:, 1]
+    joint_labels = labels[:, 0] * 10 + labels[:, 1]
 
     # Use PCA to reduce to Nd dimensions
     from sklearn.decomposition import PCA
@@ -243,29 +243,41 @@ def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int
     latents_Nd = pca.fit_transform(latents)
     
     if Nd == 2:
-        # For 2D, we can visualize the latent space with a scatter plot
         import matplotlib.pyplot as plt
-        plt.figure(figsize=(8, 6))
-        scatter = plt.scatter(latents_Nd[:, 0], latents_Nd[:, 1], c=labels, cmap='viridis', alpha=0.7)
-        plt.colorbar(scatter, ticks=np.unique(labels))
-        plt.title('2D PCA of Latent Space')
-        plt.xlabel('Principal Component 1')
-        plt.ylabel('Principal Component 2')
-        plt.grid()
+        fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharex=True, sharey=True, constrained_layout=True)
+        specs = [
+            (joint_labels, np.unique(joint_labels), 'viridis', '2D PCA of Latent Space (joint label)'),
+            (labels[:, 0], np.unique(labels[:, 0]), 'tab10', '2D PCA of Latent Space (digit label)'),
+            (labels[:, 1], np.unique(labels[:, 1]), 'Set2', '2D PCA of Latent Space (color label)'),
+        ]
+        for ax, (label_values, ticks, cmap, title) in zip(axs, specs):
+            scatter = ax.scatter(latents_Nd[:, 0], latents_Nd[:, 1], c=label_values, cmap=cmap, alpha=0.7, s=10)
+            fig.colorbar(scatter, ax=ax, ticks=ticks)
+            ax.set_title(title)
+            ax.set_xlabel('Principal Component 1')
+            ax.set_ylabel('Principal Component 2')
+            ax.grid(True)
         plt.show()
     
     if Nd == 3:
-        # For 3D, we can visualize the latent space with a 3D scatter plot
-        from mpl_toolkits.mplot3d import Axes3D
         import matplotlib.pyplot as plt
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        scatter = ax.scatter(latents_Nd[:, 0], latents_Nd[:, 1], latents_Nd[:, 2], c=labels, cmap='viridis', alpha=0.7)
-        fig.colorbar(scatter, ticks=np.unique(labels))
-        ax.set_title('3D PCA of Latent Space')
-        ax.set_xlabel('Principal Component 1')
-        ax.set_ylabel('Principal Component 2')
-        ax.set_zlabel('Principal Component 3')
+        fig = plt.figure(figsize=(18, 6), constrained_layout=True)
+        axs = [fig.add_subplot(1, 3, i + 1, projection='3d') for i in range(3)]
+        specs = [
+            (joint_labels, np.unique(joint_labels), 'viridis', '3D PCA of Latent Space (joint label)'),
+            (labels[:, 0], np.unique(labels[:, 0]), 'tab10', '3D PCA of Latent Space (digit label)'),
+            (labels[:, 1], np.unique(labels[:, 1]), 'Set2', '3D PCA of Latent Space (color label)'),
+        ]
+        for ax, (label_values, ticks, cmap, title) in zip(axs, specs):
+            scatter = ax.scatter(
+                latents_Nd[:, 0], latents_Nd[:, 1], latents_Nd[:, 2],
+                c=label_values, cmap=cmap, alpha=0.7, s=10
+            )
+            fig.colorbar(scatter, ax=ax, ticks=ticks, shrink=0.75)
+            ax.set_title(title)
+            ax.set_xlabel('Principal Component 1')
+            ax.set_ylabel('Principal Component 2')
+            ax.set_zlabel('Principal Component 3')
         plt.show()
     
     return latents_Nd, labels
