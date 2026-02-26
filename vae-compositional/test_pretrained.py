@@ -8,6 +8,8 @@ from mnist import combine_grayscale_levels_mnist, mnist
 from train_pl import VAE
 from utils import visualize_reconstructions
 
+from sklearn.decomposition import PCA
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_LOGS_ROOT = SCRIPT_DIR / "VAE_logs" / "lightning_logs"
@@ -130,7 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="../data/", help="MNIST data root.")
     parser.add_argument("--batch_size", type=int, default=128, help="Data loader batch size.")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of dataloader workers.")
-    parser.add_argument("--n_images", type=int, default=8, help="Number of reconstructions to visualize.")
+    parser.add_argument("--n_images", type=int, default=20, help="Number of reconstructions to visualize.")
     parser.add_argument(
         "--n_grayscale_levels",
         type=int,
