@@ -179,12 +179,12 @@ def train_vae(args):
     # Combination of multiple grayscale levels of MNIST
     combined_train_loader  = combine_grayscale_levels_mnist(
         train_loader, n_grayscale_levels=6, 
-        level_0_digits=[0,1,2,3,5,6,7,8,9], # no 4
-        level_1_digits=[0,1,2,4,5,6,7,8,9], # no 3
+        level_0_digits=[1,2,3,4,5,6,7,8,9], # no 0
+        level_1_digits=[1,2,3,4,5,6,7,8,9], # no 0
         level_2_digits=[1,2,3,4,5,6,7,8,9], # no 0
         level_3_digits=[0,1,2,3,4,5,6,7,9], # no 8
-        level_4_digits=[0,2,3,4,5,6,7,8,9], # no 1
-        level_5_digits=[0,1,2,3,4,5,6,7,8]) # no 9
+        level_4_digits=[0,1,2,3,4,5,6,7,9], # no 8
+        level_5_digits=[0,1,2,3,4,5,6,7,9]) # no 8
     
     # combined_train_loader  = combine_grayscale_levels_mnist(
     #     train_loader, n_grayscale_levels=4, 
