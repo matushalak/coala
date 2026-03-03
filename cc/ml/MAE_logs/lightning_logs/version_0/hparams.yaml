@@ -1,5 +1,0 @@
-lr: 0.001
-mask_ratio: 0.5
-masked_loss_weight: 4.0
-num_filters: 32
-patch_size: 4

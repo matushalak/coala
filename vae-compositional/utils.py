@@ -213,6 +213,8 @@ def visualize_reconstructions(model, data_loader, n_images=12):
 
 def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int = 2):
     from tqdm import tqdm
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
     latents = []
     labels = []
 
@@ -238,12 +240,11 @@ def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int
     joint_labels = labels[:, 0] * 10 + labels[:, 1]
 
     # Use PCA to reduce to Nd dimensions
-    from sklearn.decomposition import PCA
     pca = PCA(n_components=Nd)
     latents_Nd = pca.fit_transform(latents)
     
     if Nd == 2:
-        import matplotlib.pyplot as plt
+        
         fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharex=True, sharey=True, constrained_layout=True)
         specs = [
             (joint_labels, np.unique(joint_labels), 'viridis', '2D PCA of Latent Space (joint label)'),
@@ -260,7 +261,6 @@ def map_high_dimensional_latent_reconstructions_to_Nd(model, test_loader, Nd:int
         plt.show()
     
     if Nd == 3:
-        import matplotlib.pyplot as plt
         fig = plt.figure(figsize=(18, 6), constrained_layout=True)
         axs = [fig.add_subplot(1, 3, i + 1, projection='3d') for i in range(3)]
         specs = [

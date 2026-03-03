@@ -8,9 +8,9 @@ from cc.ml.heads.task_head import create_task_head_trainer
 def train_mnist_classifier(batch_size, lr)-> ClassifierHead:
     train_loader, val_loader, test_loader = mnist(batch_size=batch_size,num_workers=4)
     MNIST_classifier = ClassifierHead.from_pretrained_unet(
-        checkpoint_path=os.path.join(MAE_logs, "version_7/checkpoints/epoch=20-step=8862.ckpt"),
+        checkpoint_path=os.path.join(MAE_logs, "version_11/checkpoints/epoch=15-step=6752.ckpt"),
         num_classes=10,
-        latent_dim=32*4,
+        latent_dim=32*4, # in version 9 was 64*4
         lr=lr,
         freeze_encoder=True,
     )

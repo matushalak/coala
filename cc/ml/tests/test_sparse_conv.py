@@ -10,14 +10,14 @@ if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[3]))
 
 from cc.ml.sparse_cnn_unet import SparseConv2d
-
+from cc import DATADIR
 
 def _load_mnist_digit_mask() -> torch.BoolTensor:
     import torchvision
     from torchvision import transforms
 
     dataset = torchvision.datasets.MNIST(
-        root=".../data",
+        root=DATADIR,
         train=False,
         download=True,
         transform=transforms.ToTensor(),

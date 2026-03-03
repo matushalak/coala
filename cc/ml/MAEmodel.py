@@ -112,11 +112,12 @@ class ReconstructionCallback(pl.Callback):
         if self._example_batch is None and batch_idx == 0:
             self._example_batch = batch[0][:self.num_images].detach().cpu()
 
+    # TODO: fix overwriting initial samples from before epoch 0
     @torch.no_grad()
     def on_validation_epoch_end(self, trainer, pl_module):
         if self._example_batch is None:
             return
-        if (trainer.current_epoch + 1) % self.every_n_epochs != 0:
+        if trainer.current_epoch % self.every_n_epochs != 0:
             return
 
         imgs = self._example_batch.to(pl_module.device)
@@ -129,13 +130,14 @@ class ReconstructionCallback(pl.Callback):
 
         panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
         grid = make_grid(panel, nrow=self.num_images, normalize=False, pad_value=grey)
-        epoch = trainer.current_epoch + 1
+        epoch = trainer.current_epoch
         trainer.logger.experiment.add_image("MAE/original_masked_recon", grid, global_step=epoch)
 
         if self.save_to_disk:
             save_image(grid, os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_recon.png"))
 
-
+# TODO: make general and accept dataset:tuple[Dataloader, Dataloader, Dataloader]
+# make another file called mnist_mae where args are specified and this is called with MNIST dataset
 def train_mae(args):
     os.makedirs(args.log_dir, exist_ok=True)
     train_loader, val_loader, test_loader = mnist(
@@ -199,7 +201,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", default=128, type=int, help="Minibatch size.")
 
     parser.add_argument("--data_dir", default="../data/", type=str, help="Directory where to look for the data.")
-    parser.add_argument("--epochs", default=21, type=int, help="Max number of epochs.")
+    parser.add_argument("--epochs", default=16, type=int, help="Max number of epochs.") # probably less is enough
     parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
     parser.add_argument("--num_workers",default=10,type=int,
                         help=("Number of workers to use in data loaders. For strict determinism set this to 0."),)
