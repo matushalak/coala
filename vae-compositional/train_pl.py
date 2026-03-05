@@ -13,7 +13,7 @@ from mnist import mnist, inverse_mnist, combine_mnist_inverse_mnist, combine_gra
 from cnn_encoder_decoder import CNNEncoder, CNNDecoder
 from utils import *
 
-
+# TODO: adjust to also accept multi-channel inputs for compositional MNIST, e.g. by adding an additional argument for the number of channels and adjusting the encoder/decoder accordingly
 class VAE(pl.LightningModule):
 
     def __init__(self, num_filters, z_dim, lr):

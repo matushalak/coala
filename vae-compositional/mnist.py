@@ -1,19 +1,4 @@
-################################################################################
-# MIT License
-#
-# Copyright (c) 2022
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to conditions.
-#
-# Author: Deep Learning Course | Autumn 2022
-# Date Created: 2022-11-25
-################################################################################
-
+# MNIST, Inverse MNIST and Grayscale-level MNIST dataset loading and utilities. 
 import torchvision
 from torchvision import transforms
 import torch
@@ -34,7 +19,7 @@ class DiscretizeTransform:
     def __call__(self, x):
         return discretize(x, self.num_values)
 
-def mnist(root='../data/', batch_size=128, num_workers=4, download=True):
+def mnist(root='../data/', batch_size=128, num_workers=4, download=True, num_values=16):
     """
     Returns data loaders for 4-bit MNIST dataset, i.e. values between 0 and 15.
 
@@ -48,9 +33,9 @@ def mnist(root='../data/', batch_size=128, num_workers=4, download=True):
                    root directory.
     """
     data_transforms = transforms.Compose([transforms.ToTensor(),
-                                          DiscretizeTransform(num_values=16)
+                                          DiscretizeTransform(num_values=num_values)
                                           # Lambda was leading to picking issues on macOS
-                                          # transforms.Lambda(lambda x: discretize(x, num_values=16))
+                                          # transforms.Lambda(lambda x: discretize(x, num_values=num_values))
                                         ])
 
     dataset = torchvision.datasets.MNIST(
@@ -67,7 +52,7 @@ def mnist(root='../data/', batch_size=128, num_workers=4, download=True):
     # when writing the train code.
     train_loader = data.DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, persistent_workers=True)
+        pin_memory=True, persistent_workers=(num_workers > 0))
     val_loader = data.DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False, num_workers=0,
         drop_last=False)
@@ -84,13 +69,13 @@ class InvertDiscretizeTransform:
     def __call__(self, x):
         return (self.num_values - 1) - discretize(x, self.num_values)
 
-def inverse_mnist(root='../data/', batch_size=128, num_workers=4, download=True):
+def inverse_mnist(root='../data/', batch_size=128, num_workers=4, download=True, num_values=16):
     '''
     Black digits on white background, MNIST for generalization testing purposes.
     Returns train / val / test data loaders.
     '''
     data_transforms = transforms.Compose([transforms.ToTensor(),
-                                          InvertDiscretizeTransform(num_values=16)
+                                          InvertDiscretizeTransform(num_values=num_values)
                                         ])
 
     dataset = torchvision.datasets.MNIST(
@@ -223,19 +208,12 @@ def combine_grayscale_levels_mnist(
     if unknown_keys:
         raise ValueError(f"Unknown kwargs: {sorted(unknown_keys)}")
 
-    if kwargs:
-        missing_keys = expected_keys - set(kwargs.keys())
-        if missing_keys:
-            raise ValueError(
-                f"Missing digit filters: {sorted(missing_keys)}. "
-                "Provide one list per grayscale level or pass no kwargs."
-            )
-    else:
-        kwargs = {key: None for key in expected_keys}
+    if not kwargs:
+        kwargs = {}
 
     level_datasets = []
     for level_idx in range(n_grayscale_levels):
-        level_digits = kwargs[f"level_{level_idx}_digits"]
+        level_digits = kwargs.get(f"level_{level_idx}_digits")
         level_dataset = _DigitGrayscaleLevelDataset(
             mnist_loader.dataset,
             level_label=level_idx,
