@@ -15,13 +15,17 @@ def msmnist(
     patch_size: int = 4,
     mask_ratio: float = 0.5,
     mask_pattern: str = "random",
-    num_timeframes: int = 4,
+    masked_fill: str | float = 0.0,
+    number_of_masks: int = 100,
+    timesteps_per_mask: int = 1,
+    accepted_digits: list[int] | None = None,
 ):
     """
     Returns data loaders for Masked Sequential MNIST.
 
     Each data batch has shape:
-        (batch_size, num_timeframes, channels, height, width)
+        (batch_size, num_timeframes, channels, height, width),
+    where num_timeframes = number_of_masks * timesteps_per_mask.
     """
     mean = (0.1307,)
     std = (0.3081,)
@@ -39,30 +43,61 @@ def msmnist(
         root, train=False, transform=data_transforms, download=download
     )
 
+    if accepted_digits is not None:
+        accepted_digits = sorted(set(accepted_digits))
+        if len(accepted_digits) == 0:
+            raise ValueError("accepted_digits must contain at least one digit when provided.")
+        if any(d < 0 or d > 9 for d in accepted_digits):
+            raise ValueError("accepted_digits values must be in [0, 9].")
+
+        digits = torch.tensor(accepted_digits, dtype=dataset.targets.dtype)
+
+        train_mask = (dataset.targets.unsqueeze(1) == digits.unsqueeze(0)).any(dim=1)
+        train_idx = torch.nonzero(train_mask, as_tuple=False).squeeze(1)
+        if train_idx.numel() == 0:
+            raise ValueError(f"No training samples found for accepted_digits={accepted_digits}.")
+        dataset = data.Subset(dataset, train_idx.tolist())
+
+        test_mask = (test_set.targets.unsqueeze(1) == digits.unsqueeze(0)).any(dim=1)
+        test_idx = torch.nonzero(test_mask, as_tuple=False).squeeze(1)
+        if test_idx.numel() == 0:
+            raise ValueError(f"No test samples found for accepted_digits={accepted_digits}.")
+        test_set = data.Subset(test_set, test_idx.tolist())
+
+    train_len = int(0.9 * len(dataset))
+    if train_len == 0 and len(dataset) > 0:
+        train_len = 1
+    val_len = len(dataset) - train_len
     train_base, val_base = random_split(
-        dataset, lengths=[54000, 6000], generator=torch.Generator().manual_seed(42)
+        dataset, lengths=[train_len, val_len], generator=torch.Generator().manual_seed(42)
     )
 
     train_dataset = MaskedSequentialDataset(
         train_base,
         patch_size=patch_size,
         mask_ratio=mask_ratio,
-        num_timeframes=num_timeframes,
+        number_of_masks=number_of_masks,
+        timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
+        masked_fill=masked_fill,
     )
     val_dataset = MaskedSequentialDataset(
         val_base,
         patch_size=patch_size,
         mask_ratio=mask_ratio,
-        num_timeframes=num_timeframes,
+        number_of_masks=number_of_masks,
+        timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
+        masked_fill=masked_fill,
     )
     test_dataset = MaskedSequentialDataset(
         test_set,
         patch_size=patch_size,
         mask_ratio=mask_ratio,
-        num_timeframes=num_timeframes,
+        number_of_masks=number_of_masks,
+        timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
+        masked_fill=masked_fill,
     )
 
     train_loader = data.DataLoader(
@@ -91,23 +126,47 @@ def msmnist(
     return train_loader, val_loader, test_loader
 
 # visualize a few examples of the dataset
-def visualize_msmnist_examples(num_examples: int = 4, mask_ratio: float = 0.5, num_timeframes: int = 25):
+def visualize_msmnist_examples(
+    num_examples: int = 4,
+    mask_ratio: float = 0.5,
+    masked_fill: str | float = 0.0,
+    number_of_masks: int = 100,
+    timesteps_per_mask: int = 1,
+    accepted_digits: list[int] | None = None,
+    show: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
     import matplotlib.pyplot as plt
-
-    train_loader, _, _ = msmnist(batch_size=num_examples, num_workers=0, mask_ratio=mask_ratio, num_timeframes=num_timeframes)
+    train_loader, _, _ = msmnist(
+        batch_size=num_examples,
+        num_workers=0,
+        mask_ratio=mask_ratio,
+        masked_fill=masked_fill,
+        number_of_masks=number_of_masks,
+        timesteps_per_mask=timesteps_per_mask,
+        accepted_digits=accepted_digits,
+    )
     batch = next(iter(train_loader))
     masked_imgs, labels = batch
     # masked_imgs shape: (batch_size, num_timeframes, channels, height, width)
-    fig, axes = plt.subplots(num_examples, masked_imgs.shape[1], figsize=(10, 2 * num_examples))
-    for i in range(num_examples):
-        for t in range(masked_imgs.shape[1]):
-            img = masked_imgs[i, t].squeeze(0).cpu()  # shape: (height, width)
-            axes[i, t].imshow(img, cmap='gray', vmin=masked_imgs.min().item(), vmax=masked_imgs.max().item())
-            axes[i, t].axis('off')
-            if t == 0:
-                axes[i, t].set_title(f"Label: {labels[i].item()}")
-    fig.tight_layout()
-    plt.show()
+    if show:
+        batch_size, total_t, channels, height, width = masked_imgs.shape
+        vmin, vmax = masked_imgs.min().item(), masked_imgs.max().item()
+        padding = 2
+        frames = masked_imgs.reshape(batch_size * total_t, channels, height, width)
+        grid_img = torchvision.utils.make_grid(
+            frames,
+            nrow=total_t,
+            normalize=False,
+            padding=padding,
+            pad_value=(vmax - vmin) / 2,
+        )
+        fig, ax = plt.subplots(figsize=(2 * total_t, 2))
+        if channels == 1:
+            ax.imshow(grid_img[0], cmap="gray", vmin=vmin, vmax=vmax, interpolation="nearest")
+        else:
+            ax.imshow(grid_img.permute(1, 2, 0), interpolation="nearest")
+        fig.tight_layout()
+        plt.show()
 
     return masked_imgs, labels
 

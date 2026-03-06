@@ -86,6 +86,14 @@ FF_FF.update({
     "W_pv_init": {'mu': ([1e-3, 1e-3], [1e-3,1e-3]), 'sigma': [1e-2, 1e-2]},
     })
 
+FF_un = FF_FF.copy()
+FF_un.update({
+    "w_ff_init": {'mu': [1, 1], 'sigma': 1e-4},
+    "w_fb_init": {'mu': [1e-7, 1e-7], 'sigma': 1e-4},
+    "w_lat_init": {'mu': [0.3, 0.3], 'sigma': 1e-2},
+    "W_pv_init": {'mu': ([0.2, 0.2], [0.2,0.2]), 'sigma': [1e-2, 1e-2]},
+    })
+
 # Overview
 # unresponsive -> unresponsive (subthreshold only PV get stronger because just FF inhibition)
 # unresponsive -> FF (different mechanism, X minimal circuit)
@@ -112,8 +120,10 @@ minimal_configs = {
     "narrow_familiar": narrow_familiar,
     "narrow_novel": narrow_novel,
     "nonresponder": nonresponder,
+    
     "un_FF": un_FF,
     "un_FB": un_FB,
     "FF_FF": FF_FF,
+    "FF_un": FF_un,
     "FB_x": FB_x
 }

@@ -40,11 +40,11 @@ class CNNEncoder(nn.Module):
             nn.LayerNorm((2*num_filters, 7, 7)),
             nn.GELU(),
             # downsample res
-            nn.Conv2d(2*num_filters, 2*num_filters, kernel_size=3, padding=1, stride=2), # 7x7 => 4x4
-            nn.LayerNorm((2*num_filters, 4, 4)),
+            nn.Conv2d(2*num_filters, 4*num_filters, kernel_size=3, padding=1, stride=2), # 7x7 => 4x4
+            nn.LayerNorm((4*num_filters, 4, 4)),
             nn.GELU(),
             nn.Flatten(), # Image grid to single feature vector 4x4 => (16,)
-            nn.Linear(16*2*num_filters, z_dim)
+            nn.Linear(16*4*num_filters, z_dim)
         )
 
     def forward(self, x):
@@ -99,15 +99,15 @@ class CNNDecoder(nn.Module):
         """
         super().__init__()
 
-        self.expand = nn.Linear(z_dim, 16*2*num_filters) # (20,) => (16*2*32,) => (2*32, 4, 4)
+        self.expand = nn.Linear(z_dim, 16*4*num_filters) # (20,) => (16*4*32,) => (4*32, 4, 4)
         # Architecture from Tutorial 9 adapted to 28x28 MNIST
         # + added LayerNorm before nonlinearities
         # + added residual connections around Conv blocks that dont change shape
         self.decoder = nn.Sequential(
-            nn.LayerNorm((2*num_filters, 4, 4)),
+            nn.LayerNorm((4*num_filters, 4, 4)),
             nn.GELU(),
             # upsample with transposed conv
-            nn.ConvTranspose2d(2*num_filters, 2*num_filters, kernel_size=3, output_padding=0, padding=1, stride=2), # 4x4 => 7x7
+            nn.ConvTranspose2d(4*num_filters, 2*num_filters, kernel_size=3, output_padding=0, padding=1, stride=2), # 4x4 => 7x7
             nn.LayerNorm((2*num_filters, 7, 7)),
             nn.GELU(),
             # dont change shape - normal conv with residual connection

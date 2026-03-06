@@ -1,7 +1,6 @@
 import torch
 import torch.utils.data as data
 
-
 class MaskedSequentialDataset(data.Dataset):
     """
     Masked Sequential dataset where 
@@ -12,9 +11,8 @@ class MaskedSequentialDataset(data.Dataset):
         dataset: Which dataset to use (eg. MNIST)
         patch_size: Size of each patch
         mask_ratio: Mask ratio (eg. 50% of patches masked)
-        num_timeframes: The number of timeframes that model is shown 
-            the different masked versions of the image 
-            (each timestep different random patches are masked)
+        number_of_masks: Number of distinct sampled masks
+        timesteps_per_mask: How many consecutive timesteps to reuse each mask
     
     
     Each retrieved batch is of the shape: (batch_size, num_timeframes, channels, height, width)
@@ -28,23 +26,40 @@ class MaskedSequentialDataset(data.Dataset):
         dataset: data.Dataset,
         patch_size: int,
         mask_ratio: float,
-        num_timeframes: int,
+        number_of_masks: int = 100,
+        timesteps_per_mask: int = 1,
         mask_pattern: str = "random",
+        masked_fill: str | float = 0.0,
     ):
         super().__init__()
         if patch_size <= 0:
             raise ValueError("patch_size must be > 0.")
         if not (0.0 <= mask_ratio <= 1.0):
             raise ValueError("mask_ratio must be in [0, 1].")
-        if num_timeframes <= 0:
-            raise ValueError("num_timeframes must be > 0.")
+        if number_of_masks <= 0:
+            raise ValueError("number_of_masks must be > 0.")
+        if timesteps_per_mask <= 0:
+            raise ValueError("timesteps_per_mask must be > 0.")
         if mask_pattern not in ("random", "structured"):
             raise ValueError("mask_pattern must be one of: 'random', 'structured'.")
+        if isinstance(masked_fill, str):
+            if masked_fill != "random":
+                raise ValueError("masked_fill must be 'random' or a float.")
+            self.masked_fill_mode = "random"
+            self.masked_fill_value = 0.0
+        else:
+            try:
+                self.masked_fill_value = float(masked_fill)
+            except (TypeError, ValueError):
+                raise ValueError("masked_fill must be 'random' or a float.") from None
+            self.masked_fill_mode = "constant"
 
         self.dataset = dataset
         self.patch_size = patch_size
         self.mask_ratio = mask_ratio
-        self.num_timeframes = num_timeframes
+        self.number_of_masks = number_of_masks
+        self.timesteps_per_mask = timesteps_per_mask
+        self.num_timeframes = number_of_masks * timesteps_per_mask
         self.mask_pattern = mask_pattern
 
         sample_img, _ = self.dataset[0]
@@ -72,6 +87,7 @@ class MaskedSequentialDataset(data.Dataset):
         return len(self.dataset)
 
     def _sample_keep_mask(self) -> torch.BoolTensor:
+        m = self.number_of_masks
         t = self.num_timeframes
         p = self.num_patches
 
@@ -81,16 +97,18 @@ class MaskedSequentialDataset(data.Dataset):
             return torch.ones(t, p, dtype=torch.bool)
 
         if self.mask_pattern == "random":
-            scores = torch.rand(t, p)
+            scores = torch.rand(m, p)
             keep_idx = scores.topk(self.num_keep, dim=1, largest=True, sorted=False).indices
-            keep = torch.zeros(t, p, dtype=torch.bool)
+            keep = torch.zeros(m, p, dtype=torch.bool)
             keep.scatter_(1, keep_idx, True)
+            if self.timesteps_per_mask > 1:
+                keep = keep.repeat_interleave(self.timesteps_per_mask, dim=0)
             return keep
 
         centers = torch.stack(
             (
-                torch.rand(t) * (self.patches_h - 1),
-                torch.rand(t) * (self.patches_w - 1),
+                torch.rand(m) * (self.patches_h - 1),
+                torch.rand(m) * (self.patches_w - 1),
             ),
             dim=1,
         )
@@ -98,8 +116,10 @@ class MaskedSequentialDataset(data.Dataset):
         dists = diffs.square().sum(dim=-1)
         dists = dists + 1e-4 * torch.rand_like(dists)
         mask_idx = dists.topk(self.num_mask, dim=1, largest=False, sorted=False).indices
-        keep = torch.ones(t, p, dtype=torch.bool)
+        keep = torch.ones(m, p, dtype=torch.bool)
         keep.scatter_(1, mask_idx, False)
+        if self.timesteps_per_mask > 1:
+            keep = keep.repeat_interleave(self.timesteps_per_mask, dim=0)
         return keep
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
@@ -107,7 +127,15 @@ class MaskedSequentialDataset(data.Dataset):
         keep = self._sample_keep_mask()
         keep = keep.view(self.num_timeframes, self.patches_h, self.patches_w)
         keep = keep.repeat_interleave(self.patch_size, dim=1).repeat_interleave(self.patch_size, dim=2)
-        keep = keep.unsqueeze(1).to(dtype=img.dtype)
+        keep = keep.unsqueeze(1)
 
-        masked_imgs = img.unsqueeze(0) * keep
+        img_t = img.unsqueeze(0)
+        if self.masked_fill_mode == "random":
+            img_t = img_t.expand(self.num_timeframes, -1, -1, -1)
+            masked_imgs = torch.where(keep, img_t, torch.rand_like(img_t))
+        elif self.masked_fill_value == 0.0:
+            masked_imgs = img_t * keep.to(dtype=img.dtype)
+        else:
+            img_t = img_t.expand(self.num_timeframes, -1, -1, -1)
+            masked_imgs = torch.where(keep, img_t, self.masked_fill_value)
         return masked_imgs, label

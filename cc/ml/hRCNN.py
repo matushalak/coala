@@ -42,12 +42,10 @@ class hRCNN(nn.Module):
                 Y_new_activations[f'L{il}'] = layer(yff, yfb, Y_old_activations[f'L{il}'], 
                                                     train = True)
                 # Feed current-step activation to the next (higher) layer.
-                yff = Y_old_activations[f'L{il}']
+                yff = Y_new_activations[f'L{il}']
             # Pass output to head from current-step top-layer activations.
-            top_state = Y_old_activations[f'L{self.n_layers-1}']
-            if top_state is None:
-                top_state = torch.zeros((x.shape[0], *self.cc_layers[-1].dims_),
-                                        device=x.device,dtype=x.dtype,)
+            top_state = Y_new_activations[f'L{self.n_layers-1}']
+            assert top_state is not None, "Top layer activations should not be None."
             out = self.head(top_state)
             # Update activations for all layers at once
             Y_old_activations.update(Y_new_activations)
@@ -66,24 +64,24 @@ class hRCNN(nn.Module):
 
         self.cc_layers = nn.ModuleList()
         src = self.data_dims[1]
-        
         for il, spatial_dim in enumerate(spatial_dims):
             dst = spatial_dim[0]
             # Bottom-up FF input from layer below
             FF_conv = self.ff_downsample_convs.get(f"down{src}_to_{dst}", None)
             FF_local = self.ff_local_processing.get(f"local{dst}", None)
             assert FF_conv is not None and FF_local is not None, f"Missing FF conv or local processing for down{src}_to_{dst} and local{dst}"
-            FF_conv = FF_Conv2d(FF_conv, FF_local)
+            FF_conv = FF_Conv2d(conv=FF_conv, local_processing=FF_local)
             # Top-down FB context from layer above (if exists). Top layer has no feedback source.
             if il < self.n_layers - 1:
                 next_dim = spatial_dims[il + 1][0]
             else:
                 next_dim = None
-            FB_local = self.fb_local_processing.get(f"local{next_dim}", None)
-            FB_conv = self.fb_upsample_convs.get(f"up{next_dim}_to_{dst}", None)
-            FB_local2 = self.fb_local_processing.get(f"local{dst}", None) if il == 0 else None
-            FB_conv = FB_Conv2d(FB_conv, FB_local, FB_local2) if FB_conv is not None else None
-            # print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
+            FB_local0 = self.fb_local_processing.get(f"local{next_dim}", None) if il == len(spatial_dims)-2 else None
+            FB_local = self.fb_local_processing.get(f"local{dst}", None)
+            FB_upconv = self.fb_upsample_convs.get(f"up{next_dim}_to_{dst}", None)
+            FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local, local_processing0=FB_local0
+                                ) if FB_upconv is not None else None
+            print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
             layer = CCModule(spatial_dim, FF_conv, FB_conv)
             self.cc_layers.append(layer)
             src = dst
@@ -131,6 +129,9 @@ class hRCNN(nn.Module):
             self.head.eval()
 
 class FF_Conv2d(nn.Module):
+    ''''
+    Downsampling convolution + local processing
+    '''
     def __init__(self, conv:SparseConv2d, local_processing:SparseLocalStage):
         super(FF_Conv2d, self).__init__()
         self.conv = conv
@@ -143,19 +144,24 @@ class FF_Conv2d(nn.Module):
         return x
 
 class FB_Conv2d(nn.Module):
-    def __init__(self, conv:nn.ConvTranspose2d|DenseUpConv2d, local_processing:DenseLocalStage, 
-                 local_processing2:DenseLocalStage|None = None):
+    '''
+    Upsampling convolution + local processing (w optional skip connection)
+    '''
+    def __init__(self, upconv:nn.ConvTranspose2d|DenseUpConv2d, local_processing:DenseLocalStage, 
+                 local_processing0:DenseLocalStage|None = None):
         super(FB_Conv2d, self).__init__()
-        self.conv = conv
+        self.upconv = upconv
         self.local_processing = local_processing
-        self.local_processing2 = local_processing2
-        self.out_channels = conv.out_channels
+        self.local_processing0 = local_processing0
+        self.out_channels = upconv.out_channels
 
-    def forward(self, x:torch.Tensor)->torch.Tensor:
+    def forward(self, x:torch.Tensor, skip:torch.Tensor|None)->torch.Tensor:
+        if self.local_processing0 is not None:
+            x = self.local_processing0(x)
+        x = self.upconv(x)
+        if skip is not None:
+            x = x + skip
         x = self.local_processing(x)
-        x = self.conv(x)
-        if self.local_processing2 is not None:
-            x = self.local_processing2(x)
         return x
 
 # --- hRCNN utils ---
@@ -163,23 +169,24 @@ def load_pretrained_weights()->hRCNN:
     # Define pre-trained autoencoder model
     mae_model = SparseCNNUNet(num_input_channels=1, num_output_channels=1, num_filters=32)
     # Load pre-trained autoencoder weights (replace with actual checkpoint path)
-    mae_checkpoint_path = f"{MAE_logs}/version_11/checkpoints/epoch=15-step=6752.ckpt"
+    mae_checkpoint_path = f"{MAE_logs}/version_12/checkpoints/epoch=15-step=6752.ckpt"
     load_checkpoint(mae_model, mae_checkpoint_path)
     encoder:SparseCNNEncoder = mae_model.encoder
     decoder:SparseCNNDecoder = mae_model.decoder
     
-    # Load pre-trained head
-    mnist_classifier_head = ClassifierHead.from_pretrained_unet(
+    # Load pre-trained classifier with head
+    mnist_classifier = ClassifierHead.from_pretrained_unet(
         checkpoint_path=mae_checkpoint_path,
         num_classes=10, # MNIST has 10 classes
         latent_dim=32*4, # latent dimension from the MAE model 
         lr=1e-3,
-        freeze_encoder=True,
-    ).head
-    # Load pre-trained head weights
-    head_checkpoint_path = f"{Classifier_logs}/version_21/checkpoints/epoch=5-step=2532.ckpt"
-    load_checkpoint(mnist_classifier_head, head_checkpoint_path, weights_only=False)
-    
+        freeze_encoder=True)
+    # Load pre-trained classifier weights
+    classifier_checkpoint_path = f"{Classifier_logs}/version_22/checkpoints/epoch=9-step=4220.ckpt"
+    load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False)
+    # Extract the classifier head
+    mnist_classifier_head = mnist_classifier.head
+
     # Instantiate hRCNN with the loaded encoder, decoder, and head
     model = hRCNN(encoder, decoder, mnist_classifier_head)
 
@@ -189,7 +196,11 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     hrcnn = load_pretrained_weights()
-    examples, labels = visualize_msmnist_examples(num_examples=4, num_timeframes=100, mask_ratio=0.5)
+    examples, labels = visualize_msmnist_examples(num_examples=32, 
+                                                  number_of_masks=100, timesteps_per_mask=1,
+                                                  mask_ratio=0.8,
+                                                  masked_fill=0.0,
+                                                  accepted_digits=[3], show=True)
     with torch.no_grad():
         logs = hrcnn(examples)
     # logs is a list[T] of tensors with shape (B, num_classes)
@@ -197,11 +208,12 @@ if __name__ == "__main__":
     probs = torch.softmax(logits, dim=-1)
     preds = probs.argmax(dim=-1)  # (B, T)
     timesteps = torch.arange(logits.shape[1]).cpu().numpy()
-
-    print("labels:", labels.tolist())
-    print("preds per sample/time:", preds.tolist())
-
-    fig, axes = plt.subplots(labels.shape[0], 1, figsize=(10, 2.2 * labels.shape[0]), sharex=True)
+    tick_step = max(1, logits.shape[1] // 12)
+    # print("labels:", labels.tolist())
+    # print("preds per sample/time:", preds.tolist())
+    # breakpoint()
+    fig_width = min(18.0, max(10.0, 0.35 * logits.shape[1]))
+    fig, axes = plt.subplots(labels.shape[0], 1, figsize=(fig_width, 2.2 * labels.shape[0]), sharex=True)
     if labels.shape[0] == 1:
         axes = [axes]
     for i, ax in enumerate(axes):
@@ -210,13 +222,14 @@ if __name__ == "__main__":
         pred_prob = probs[i].max(dim=-1).values.cpu().numpy()
         ax.plot(timesteps, true_prob, marker="o", label=f"P(true={true_label})")
         ax.plot(timesteps, pred_prob, marker="x", linestyle="--", label="P(pred)")
-        ax.set_ylim(0.0, 1.0)
+        ax.set_xlim(0, logits.shape[1] - 1)
         ax.set_ylabel(f"sample {i}")
         ax.grid(alpha=0.25)
-        ax.set_title(f"label={true_label} | preds={preds[i].tolist()}")
+        ax.set_title(f"label={true_label} | final_pred={int(preds[i, -1].item())}")
         ax.legend(loc="lower right")
 
     axes[-1].set_xlabel("time step")
+    axes[-1].set_xticks(timesteps[::tick_step])
     fig.tight_layout()
     plt.show()
-    
+    # breakpoint()

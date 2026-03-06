@@ -5,20 +5,20 @@ from cc.ml.heads.classifier import ClassifierHead
 from cc.ml import MAE_logs
 from cc.ml.heads.task_head import create_task_head_trainer
 
-def train_mnist_classifier(batch_size, lr)-> ClassifierHead:
+def train_mnist_classifier(batch_size, lr, epochs)-> ClassifierHead:
     train_loader, val_loader, test_loader = mnist(batch_size=batch_size,num_workers=4)
     MNIST_classifier = ClassifierHead.from_pretrained_unet(
-        checkpoint_path=os.path.join(MAE_logs, "version_11/checkpoints/epoch=15-step=6752.ckpt"),
+        checkpoint_path=os.path.join(MAE_logs, "version_12/checkpoints/epoch=15-step=6752.ckpt"),
         num_classes=10,
         latent_dim=32*4, # in version 9 was 64*4
         lr=lr,
         freeze_encoder=True,
     )
-    trainer = create_task_head_trainer(MNIST_classifier, max_epochs=10)
+    trainer = create_task_head_trainer(MNIST_classifier, max_epochs=epochs)
     trainer.fit(MNIST_classifier, train_loader, val_loader)
     MNIST_classifier = ClassifierHead.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
     trainer.test(MNIST_classifier, dataloaders=test_loader, verbose=True)
     return MNIST_classifier
 
 if __name__ == "__main__":
-    train_mnist_classifier(batch_size=128, lr=3e-3)
+    train_mnist_classifier(batch_size=128, lr=3e-3, epochs=10)

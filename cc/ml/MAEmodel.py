@@ -25,6 +25,7 @@ class MAE(pl.LightningModule):
         masked_loss_weight: float,
         num_input_channels: int = 1,
         decoder_densify_mode: str = "random",
+        use_skip: bool = True
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -33,6 +34,7 @@ class MAE(pl.LightningModule):
             num_output_channels=num_input_channels,
             num_filters=num_filters,
             decoder_densify_mode=decoder_densify_mode,
+            use_skip=use_skip,
         )
 
     def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
@@ -112,7 +114,6 @@ class ReconstructionCallback(pl.Callback):
         if self._example_batch is None and batch_idx == 0:
             self._example_batch = batch[0][:self.num_images].detach().cpu()
 
-    # TODO: fix overwriting initial samples from before epoch 0
     @torch.no_grad()
     def on_validation_epoch_end(self, trainer, pl_module):
         if self._example_batch is None:
@@ -131,10 +132,13 @@ class ReconstructionCallback(pl.Callback):
         panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
         grid = make_grid(panel, nrow=self.num_images, normalize=False, pad_value=grey)
         epoch = trainer.current_epoch
-        trainer.logger.experiment.add_image("MAE/original_masked_recon", grid, global_step=epoch)
+        is_sanity = trainer.sanity_checking
+        log_step = epoch + (0 if is_sanity else 1)
+        trainer.logger.experiment.add_image("MAE/original_masked_recon", grid, global_step=log_step)
 
         if self.save_to_disk:
-            save_image(grid, os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_recon.png"))
+            image_name = f"epoch_{epoch}_recon.png" if not is_sanity else "pre_epoch_0_recon.png"
+            save_image(grid, os.path.join(trainer.logger.log_dir, image_name))
 
 # TODO: make general and accept dataset:tuple[Dataloader, Dataloader, Dataloader]
 # make another file called mnist_mae where args are specified and this is called with MNIST dataset
@@ -164,6 +168,7 @@ def train_mae(args):
         )
 
     pl.seed_everything(args.seed)
+    print('Using skip connections in decoder:', args.no_skip)
     model = MAE(
         num_filters=args.num_filters,
         lr=args.lr,
@@ -172,6 +177,7 @@ def train_mae(args):
         masked_loss_weight=args.masked_loss_weight,
         num_input_channels=args.num_input_channels,
         decoder_densify_mode=args.decoder_densify_mode,
+        use_skip=args.no_skip,
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -196,12 +202,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_input_channels", default=1, type=int,
                         help="Number of image channels (1 for MNIST/FashionMNIST, 3 for CIFAR/SVHN).")
+    parser.add_argument("--no_skip", action="store_false", help="Whether to use skip connections in the decoder.")
 
     parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate to use.")
     parser.add_argument("--batch_size", default=128, type=int, help="Minibatch size.")
 
     parser.add_argument("--data_dir", default="../data/", type=str, help="Directory where to look for the data.")
-    parser.add_argument("--epochs", default=16, type=int, help="Max number of epochs.") # probably less is enough
+    parser.add_argument("--epochs", default=21, type=int, help="Max number of epochs.") # probably less is enough
     parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
     parser.add_argument("--num_workers",default=10,type=int,
                         help=("Number of workers to use in data loaders. For strict determinism set this to 0."),)

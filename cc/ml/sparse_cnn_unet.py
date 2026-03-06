@@ -203,10 +203,10 @@ class SparseCNNEncoder(nn.Module):
         x = x * keep_mask.to(dtype=x.dtype)
 
         x = self.down28_to_28(x, keep_mask)
-        x = self.local28(x, keep_mask)
+        x28 = self.local28(x, keep_mask)
 
         mask14 = downsample_center_mask(keep_mask, (14, 14), stride=2)
-        x14 = self.down28_to_14(x, mask14)
+        x14 = self.down28_to_14(x28, mask14)
         x14 = self.local14(x14, mask14)
 
         mask7 = downsample_center_mask(mask14, (7, 7), stride=2)
@@ -218,9 +218,11 @@ class SparseCNNEncoder(nn.Module):
         x4 = self.local4(x4, mask4)
         
         return {
+            "feat28": x28,
             "feat14": x14,
             "feat7": x7,
             "feat4": x4,
+            "mask28":keep_mask,
             "mask14": mask14,
             "mask7": mask7,
             "mask4": mask4,
@@ -240,10 +242,12 @@ class SparseCNNDecoder(nn.Module):
         num_output_channels: int = 1,
         num_filters: int = 32,
         densify_mode: str = "random",
-        conv_method: Literal['transposed_conv', 'upsample+conv'] = "transposed_conv"
+        conv_method: Literal['transposed_conv', 'upsample+conv'] = "transposed_conv",
+        use_skip:bool = True
     ):
         super().__init__()
         self.conv_method = conv_method
+        self.use_skip = use_skip
 
         c28 = num_filters // 2
         c14 = num_filters
@@ -251,11 +255,11 @@ class SparseCNNDecoder(nn.Module):
         c4 = 4 * num_filters
         self.set_densify_mode(densify_mode)
 
-        # self.mask_token28 = nn.Parameter(torch.zeros(1, c28, 1, 1))
+        self.mask_token28 = nn.Parameter(torch.zeros(1, c28, 1, 1))
         self.mask_token14 = nn.Parameter(torch.zeros(1, c14, 1, 1))
         self.mask_token7 = nn.Parameter(torch.zeros(1, c7, 1, 1))
         self.mask_token4 = nn.Parameter(torch.zeros(1, c4, 1, 1))
-        # nn.init.normal_(self.mask_token28, mean=0.0, std=0.02)
+        nn.init.normal_(self.mask_token28, mean=0.0, std=0.02)
         nn.init.normal_(self.mask_token14, mean=0.0, std=0.02)
         nn.init.normal_(self.mask_token7, mean=0.0, std=0.02)
         nn.init.normal_(self.mask_token4, mean=0.0, std=0.02)
@@ -299,19 +303,27 @@ class SparseCNNDecoder(nn.Module):
 
     def forward(self, enc_out: dict[str, torch.Tensor]) -> torch.Tensor:
         dense4 = self._densify(enc_out["feat4"], enc_out["mask4"], self.mask_token4)
-        dense7_skip = self._densify(enc_out["feat7"], enc_out["mask7"], self.mask_token7)
-        dense14_skip = self._densify(enc_out["feat14"], enc_out["mask14"], self.mask_token14)
-
         x = self.local4(dense4)
         x = self.up4_to_7(x)
-        x = x + dense7_skip
+        
+        if self.use_skip:
+            dense7_skip = self._densify(enc_out["feat7"], enc_out["mask7"], self.mask_token7)
+            x = x + dense7_skip
         x = self.local7(x)
         x = self.up7_to_14(x)
-        x = x + dense14_skip
+        
+        if self.use_skip:
+            dense14_skip = self._densify(enc_out["feat14"], enc_out["mask14"], self.mask_token14)
+            x = x + dense14_skip
         x = self.local14(x)
         x = self.up14_to_28(x)
+        
+        if self.use_skip:
+            dense28_skip = self._densify(enc_out["feat28"], enc_out["mask28"], self.mask_token28)
+            x = x + dense28_skip
         x = self.local28(x)
-        return self.up28_to_out(x)
+        x = self.up28_to_out(x)
+        return x
 
     @property
     def device(self):
@@ -327,6 +339,7 @@ class SparseCNNUNet(nn.Module):
         num_output_channels: int = 1,
         num_filters: int = 32,
         decoder_densify_mode: str = "random",
+        use_skip:bool = True
     ):
         super().__init__()
         self.encoder = SparseCNNEncoder(num_input_channels=num_input_channels, num_filters=num_filters)
@@ -334,7 +347,8 @@ class SparseCNNUNet(nn.Module):
             num_output_channels=num_output_channels,
             num_filters=num_filters,
             densify_mode=decoder_densify_mode,
-        )
+            use_skip=use_skip
+            )
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
         enc_out = self.encoder(x, keep_mask=keep_mask)

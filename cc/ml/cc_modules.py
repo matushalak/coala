@@ -2,14 +2,89 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Literal
+
+class LateralInhibition(nn.Module):
+    """
+    Lateral inhibition convolution with channel+spatial averaging kernel.
+
+    Each output location/channel receives the average of all channels across the
+    local spatial neighborhood.
+    """
+
+    def __init__(self, n_channels: int, kernel_size: tuple[int, int] = (3, 3)):
+        super().__init__()
+        kh, kw = kernel_size
+        assert n_channels > 0, f"n_channels must be > 0, got {n_channels}."
+        assert kh > 0 and kw > 0, f"kernel_size must be positive, got {kernel_size}."
+
+        norm = float(n_channels * kh * kw)
+        weight = torch.full((n_channels, n_channels, kh, kw), fill_value=1.0 / norm
+                            )
+        self.register_buffer("weight", weight, persistent=False)
+        self.padding = (kh // 2, kw // 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.conv2d(x, weight=self.weight, padding=self.padding)
+
+
+class LambdaModule(nn.Module):
+    '''
+    Module to learn dynamic lambdas for each synapse (feedforward, feedback, lateral)
+    '''
+    def __init__(self, channels:int, spatial_dims:tuple[int, int], learnable:bool = True,
+                 init_Lambda:float|str = 0.0, init_lr:float = 1e-3, #init_decay_alpha:float = 0.25,
+                 learning_rule:Literal['hebbian', 'anti_hebbian', 'dampened_hebbian'] = 'hebbian'):
+        super().__init__()
+        self.dims_ = (1, channels, *spatial_dims) # to enable batch broadcasting
+        self.init_Lambda = init_Lambda
+        self.Lambda = self.initialize(self.init_Lambda)
+        self.raw_lr = nn.Parameter(torch.logit(torch.tensor(init_lr)), requires_grad=learnable)
+        # self.decay_alpha = nn.Parameter(torch.tensor(init_decay_alpha), requires_grad=False)
+        self.learning_rule = learning_rule
+        assert learning_rule in ('hebbian', 'anti_hebbian', 'dampened_hebbian'
+                                 ), 'Provided learning rule is not supported'
+    
+    def forward(self, y:torch.Tensor) -> torch.Tensor:
+        return (1.0 + self.Lambda) * y
+    
+    def update(self, Y:torch.Tensor, ydrive:torch.Tensor)->None:
+        # Local update, leaks back to 0; average over batch
+        match self.learning_rule:
+            case 'hebbian':
+                self.Lambda = self.Lambda + self.lr * ((Y * ydrive).mean(dim=0, keepdim=True) - self.Lambda)
+            case 'anti_hebbian':
+                self.Lambda = self.Lambda - self.lr * ((Y * ydrive).mean(dim=0, keepdim=True) - self.Lambda)
+            case 'dampened_hebbian':
+                self.Lambda = self.Lambda + self.lr * (((1/(1+Y))*(Y * ydrive)).mean(dim=0, keepdim=True) - self.Lambda)
+    
+    @property
+    def lr(self):
+        ''''
+        Learning rate for local update, constrained to (0, 1) via sigmoid.
+        Also controls rate of decay back to 0 (leak) when no drive is present.
+        '''
+        return torch.sigmoid(self.raw_lr) * 0.99
+
+    def initialize(self, init_value:float|str = 0.0):
+        if isinstance(init_value, str):
+            assert init_value == "random", "init_value must be 'random' or a float."
+            Lambda = nn.Parameter(torch.rand(*self.dims_), requires_grad=False)
+        else: # fill with float value
+            Lambda = nn.Parameter(torch.full(*self.dims_), requires_grad=False)
+        return Lambda
+    
+    def reset(self):
+        self.Lambda = self.initialize(self.init_Lambda)
+
 
 class CCModule(nn.Module):
     '''
-    Contextual Contrasting RNN module
+    Contextual Contrasting recurrent cell module
     '''
     def __init__(self, spatial_dims:tuple[int, int], FF_conv:nn.Conv2d, FB_conv:nn.Conv2d|None, 
-                 LAT_ksize:tuple[int, int] = (3,3), activation_fn:nn.Module = nn.GELU(),
-                 time_alpha:float|torch.Tensor = 1.0
+                 LAT_ksize:tuple[int, int] = (3,3), activation_fn:nn.Module = nn.Identity(),
+                 time_alpha:float|torch.Tensor | None = 0.8
                  ):
         super().__init__()
         assert FF_conv is not None, "Feedforward convolution layer (FF_conv) must be provided."
@@ -17,26 +92,36 @@ class CCModule(nn.Module):
         # Initialize convolution layers for feedforward, feedback, and lateral inhibition
         self.FF_conv = FF_conv # pre-trained feedforward convolution layer (fixed weights)
         self.FB_conv = FB_conv # pre-trained feedback convolution layer (fixed weights)
-        # Lateral inhibition implemented as a convolution with fixed weights (sum over local neighborhood)
-        self.LAT_conv = lambda y: F.conv2d(
-            y, weight=torch.ones(size=(FF_conv.out_channels, FF_conv.out_channels, *LAT_ksize),requires_grad=False),
-            padding = (LAT_ksize[0]//2, LAT_ksize[1]//2))
+        self.LAT_conv = LateralInhibition(FF_conv.out_channels, LAT_ksize) # average kernel across channels+space.
         
         # Define dynamic lambdas for individual synapses (3-compartment neuron)
-        self.Lambda_FF = nn.Parameter(torch.randn(1, FF_conv.out_channels, *spatial_dims), requires_grad=False)
+        self.Lambda_FF = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, init_Lambda=0.0, 
+                                      learning_rule='anti_hebbian')
         
         if FB_conv is not None:
-            self.Lambda_FB = nn.Parameter(torch.randn(1, FF_conv.out_channels, *spatial_dims), requires_grad=False)
+            self.Lambda_FB = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, init_Lambda=0.0, 
+                                          learning_rule='dampened_hebbian')
         else:
             self.Lambda_FB = None
         
-        self.Lambda_LAT = nn.Parameter(torch.randn(1, FF_conv.out_channels, *spatial_dims), requires_grad=False)
+        self.Lambda_LAT = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, init_Lambda=0.0, 
+                                       learning_rule='hebbian')
 
         # activation function (e.g., ReLU)
         self.activation_fn = activation_fn
+        self.sigmoid = nn.Sigmoid()
+        self.tanh = nn.Tanh()
 
         # (dt/tau) time alpha for neurons (TODO: this should probably be fine-tuned or learned with backprop per task)
-        self.time_alpha = nn.Parameter(torch.as_tensor(time_alpha), requires_grad=False)
+        if time_alpha is None:
+            self.time_alpha = nn.Parameter(torch.randn(1), requires_grad=True)
+        else:
+            self.time_alpha = nn.Parameter(torch.as_tensor(time_alpha), requires_grad=False)
+        
+        # TODO: parameters to learn with backprop learning
+        # time alphas for each of the lambdas
+
+        # LRs for each of the lambda local learning rules
 
         # keep mask
         self.register_buffer("keep_mask", torch.ones(1, 1, *spatial_dims, dtype=torch.bool), persistent=False)
@@ -57,15 +142,15 @@ class CCModule(nn.Module):
         y_LAT = torch.zeros_like(y_FF)
         
         # Combine contributions with dynamic lambdas
-        drive = (1+self.Lambda_FF) * y_FF 
+        drive = (1.0+self.Lambda_FF) * y_FF 
 
         if Y_old is not None:
             y_LAT = self.LAT_conv(Y_old)
-            drive -= (1+self.Lambda_LAT) * y_LAT
+            drive -= (1.0+self.Lambda_LAT) * self.activation_fn(y_LAT) # "PV cells"
 
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
-            y_FB = self.FB_conv(context)
-            drive += (1+self.Lambda_FB) * y_FB
+            y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
+            drive += (1.0+self.Lambda_FB) * y_FB
 
         # Apply activation function (drive term)
         drive = self.activation_fn(drive)
@@ -74,7 +159,8 @@ class CCModule(nn.Module):
         if Y_old is None:
             Y = drive
         else:
-            Y = Y_old + (drive - Y_old) / self.time_alpha
+            # Y = Y_old + self.sigmoid(self.time_alpha) * (drive - Y_old)
+            Y = Y_old + self.time_alpha * (drive - Y_old)
         
         # Local update in forward pass 
         # (TODO: this is a bit hacky, should probably be done in a separate update step or with a custom autograd function)
@@ -85,15 +171,15 @@ class CCModule(nn.Module):
     @torch.no_grad()
     def update(self, Y:torch.Tensor, 
                y_FF:torch.Tensor, y_FB:torch.Tensor, y_LAT:torch.Tensor,
-               lr_FF:float = 3e-3, lr_FB:float = 2e-3, lr_LAT:float = 1e-3)->None:
+               lr_FF:float = 1e-3, lr_FB:float = 1e-3, lr_LAT:float = 1e-3)->None:
         ''''
         Local update, leaks back to 0; average over batch
         '''
-        self.Lambda_FF += lr_FF * (-self.Lambda_FF - (Y * y_FF).mean(dim=0, keepdim=True))
-        self.Lambda_LAT += lr_LAT * (-self.Lambda_LAT + (Y * y_LAT).mean(dim=0, keepdim=True))
+        self.Lambda_FF += lr_FF * (- (Y * y_FF).mean(dim=0, keepdim=True) - self.Lambda_FF*self.time_alpha)
+        self.Lambda_LAT += lr_LAT * ((Y * y_LAT).mean(dim=0, keepdim=True) - self.Lambda_LAT*self.time_alpha)
         if self.Lambda_FB is not None:
-            self.Lambda_FB += lr_FB * (-self.Lambda_FB + (((1/(1+Y))) * (Y * y_FB)).mean(dim=0, keepdim=True))
-
+            self.Lambda_FB += lr_FB * ((((1/(1+Y))) * (Y*y_FB)).mean(dim=0, keepdim=True) - self.Lambda_FB*self.time_alpha)
+        # breakpoint()
 
 if __name__ == "__main__":
     # Example usage

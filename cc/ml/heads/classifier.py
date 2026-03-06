@@ -20,10 +20,10 @@ class ClassifierHead(TaskHead):
             nn.AdaptiveMaxPool2d((1, 1)), # better than average pool
             nn.Flatten(start_dim=1),
             nn.Linear(latent_dim, latent_dim),
-            nn.BatchNorm1d(latent_dim),
+            nn.LayerNorm(latent_dim),
             nn.GELU(),
             nn.Linear(latent_dim, latent_dim // 2),
-            nn.BatchNorm1d(latent_dim // 2),
+            nn.LayerNorm(latent_dim // 2),
             nn.GELU(),
             nn.Linear(latent_dim // 2, num_classes),
         )
