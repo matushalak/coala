@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -81,3 +83,51 @@ class ClassifierHead(TaskHead):
         self.log(f"{stage}_classification_loss", loss, on_step=False, on_epoch=True)
         self.log(f"{stage}_accuracy", acc, on_step=False, on_epoch=True, prog_bar=(stage != "train"))
         return loss
+
+class TemporalCEloss(nn.CrossEntropyLoss):
+    def __init__(
+        self,
+        *args,
+        plateau_fraction: float = 0.5,
+        min_weight: float = 1e-2,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.plateau_fraction = plateau_fraction
+        self.min_weight = min_weight
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # input shape: (B, T, C), target shape: (B, T)
+        B, T, C = input.shape
+        losses = F.cross_entropy(
+            input.reshape(B * T, C),
+            target.reshape(B * T),
+            weight=self.weight,
+            ignore_index=self.ignore_index,
+            reduction="none",
+            label_smoothing=self.label_smoothing,
+        ).reshape(B, T)
+
+        if T == 1:
+            time_weights = losses.new_ones(1)
+        else:
+            plateau_fraction = max(self.plateau_fraction, 1e-3)
+            time_steps = torch.arange(T, device=input.device, dtype=losses.dtype)
+            normalized_time = time_steps / (T - 1)
+            saturation_rate = math.log(100.0) / plateau_fraction
+            time_weights = 1.0 - torch.exp(-saturation_rate * normalized_time)
+            time_weights = self.min_weight + (1.0 - self.min_weight) * time_weights
+
+        if self.ignore_index >= 0:
+            valid_mask = target.ne(self.ignore_index)
+            losses = losses * valid_mask
+            denom = (valid_mask * time_weights).sum()
+        else:
+            denom = torch.full((), B * time_weights.sum(), device=losses.device, dtype=losses.dtype)
+
+        weighted_losses = losses * time_weights
+        if self.reduction == "none":
+            return weighted_losses
+        if self.reduction == "sum":
+            return weighted_losses.sum()
+        return weighted_losses.sum() / denom.clamp_min(1)

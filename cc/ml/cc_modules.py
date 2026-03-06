@@ -33,7 +33,9 @@ class LambdaModule(nn.Module):
     Module to learn dynamic lambdas for each synapse (feedforward, feedback, lateral)
     '''
     def __init__(self, channels:int, spatial_dims:tuple[int, int], learnable:bool = True,
-                 init_Lambda:float|str = 0.0, init_lr:float = 1e-3, #init_decay_alpha:float = 0.25,
+                 init_Lambda:float|str = 0.0, 
+                 init_lr:float = 1e-3, 
+                 #init_decay_alpha:float = 0.25,
                  learning_rule:Literal['hebbian', 'anti_hebbian', 'dampened_hebbian'] = 'hebbian'):
         super().__init__()
         self.dims_ = (1, channels, *spatial_dims) # to enable batch broadcasting
@@ -52,11 +54,11 @@ class LambdaModule(nn.Module):
         # Local update, leaks back to 0; average over batch
         match self.learning_rule:
             case 'hebbian':
-                self.Lambda = self.Lambda + self.lr * ((Y * ydrive).mean(dim=0, keepdim=True) - self.Lambda)
+                self.Lambda += self.lr * ((Y * ydrive).mean(dim=0, keepdim=True) - self.Lambda)
             case 'anti_hebbian':
-                self.Lambda = self.Lambda - self.lr * ((Y * ydrive).mean(dim=0, keepdim=True) - self.Lambda)
+                self.Lambda -= self.lr * ((Y * ydrive).mean(dim=0, keepdim=True) - self.Lambda)
             case 'dampened_hebbian':
-                self.Lambda = self.Lambda + self.lr * (((1/(1+Y))*(Y * ydrive)).mean(dim=0, keepdim=True) - self.Lambda)
+                self.Lambda += self.lr * (((1/(1+Y))*(Y * ydrive)).mean(dim=0, keepdim=True) - self.Lambda)
     
     @property
     def lr(self):
@@ -69,10 +71,10 @@ class LambdaModule(nn.Module):
     def initialize(self, init_value:float|str = 0.0):
         if isinstance(init_value, str):
             assert init_value == "random", "init_value must be 'random' or a float."
-            Lambda = nn.Parameter(torch.rand(*self.dims_), requires_grad=False)
+            self.Lambda = nn.Parameter(torch.rand(*self.dims_), requires_grad=False)
         else: # fill with float value
-            Lambda = nn.Parameter(torch.full(*self.dims_), requires_grad=False)
-        return Lambda
+            self.Lambda = nn.Parameter(torch.full(self.dims_, init_value), requires_grad=False)
+        return self.Lambda
     
     def reset(self):
         self.Lambda = self.initialize(self.init_Lambda)
@@ -95,22 +97,24 @@ class CCModule(nn.Module):
         self.LAT_conv = LateralInhibition(FF_conv.out_channels, LAT_ksize) # average kernel across channels+space.
         
         # Define dynamic lambdas for individual synapses (3-compartment neuron)
-        self.Lambda_FF = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, init_Lambda=0.0, 
+        self.Lambda_FF = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
+                                      init_Lambda=0.0, init_lr=1e-3,
                                       learning_rule='anti_hebbian')
         
         if FB_conv is not None:
-            self.Lambda_FB = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, init_Lambda=0.0, 
+            self.Lambda_FB = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
+                                          init_Lambda=0.0, init_lr=1e-3,
                                           learning_rule='dampened_hebbian')
         else:
             self.Lambda_FB = None
         
-        self.Lambda_LAT = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, init_Lambda=0.0, 
+        self.Lambda_LAT = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
+                                       init_Lambda=0.0, init_lr=1e-3,
                                        learning_rule='hebbian')
 
         # activation function (e.g., ReLU)
         self.activation_fn = activation_fn
         self.sigmoid = nn.Sigmoid()
-        self.tanh = nn.Tanh()
 
         # (dt/tau) time alpha for neurons (TODO: this should probably be fine-tuned or learned with backprop per task)
         if time_alpha is None:
@@ -127,8 +131,7 @@ class CCModule(nn.Module):
         self.register_buffer("keep_mask", torch.ones(1, 1, *spatial_dims, dtype=torch.bool), persistent=False)
 
     
-    def forward(self, x:torch.Tensor|None, context:torch.Tensor|None, Y_old:torch.Tensor|None,
-                train:bool = False)->torch.Tensor:
+    def forward(self, x:torch.Tensor|None, context:torch.Tensor|None, Y_old:torch.Tensor|None)->torch.Tensor:
         # Compute feedforward, feedback, and lateral inhibition contributions.
         ref = x if x is not None else (Y_old if Y_old is not None else context)
         if ref is None:
@@ -142,15 +145,15 @@ class CCModule(nn.Module):
         y_LAT = torch.zeros_like(y_FF)
         
         # Combine contributions with dynamic lambdas
-        drive = (1.0+self.Lambda_FF) * y_FF 
+        drive = self.Lambda_FF(y_FF)
 
         if Y_old is not None:
             y_LAT = self.LAT_conv(Y_old)
-            drive -= (1.0+self.Lambda_LAT) * self.activation_fn(y_LAT) # "PV cells"
+            drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
 
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
             y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
-            drive += (1.0+self.Lambda_FB) * y_FB
+            drive += self.Lambda_FB(y_FB)
 
         # Apply activation function (drive term)
         drive = self.activation_fn(drive)
@@ -162,24 +165,18 @@ class CCModule(nn.Module):
             # Y = Y_old + self.sigmoid(self.time_alpha) * (drive - Y_old)
             Y = Y_old + self.time_alpha * (drive - Y_old)
         
-        # Local update in forward pass 
-        # (TODO: this is a bit hacky, should probably be done in a separate update step or with a custom autograd function)
-        if train:
-            self.update(Y, y_FF, y_FB, y_LAT)
-        return Y
+        return Y, y_FF, y_FB, y_LAT # return all drives for local update
     
     @torch.no_grad()
     def update(self, Y:torch.Tensor, 
-               y_FF:torch.Tensor, y_FB:torch.Tensor, y_LAT:torch.Tensor,
-               lr_FF:float = 1e-3, lr_FB:float = 1e-3, lr_LAT:float = 1e-3)->None:
+               y_FF:torch.Tensor, y_FB:torch.Tensor, y_LAT:torch.Tensor)->None:
         ''''
         Local update, leaks back to 0; average over batch
         '''
-        self.Lambda_FF += lr_FF * (- (Y * y_FF).mean(dim=0, keepdim=True) - self.Lambda_FF*self.time_alpha)
-        self.Lambda_LAT += lr_LAT * ((Y * y_LAT).mean(dim=0, keepdim=True) - self.Lambda_LAT*self.time_alpha)
+        self.Lambda_FF.update(Y, y_FF)
+        self.Lambda_LAT.update(Y, y_LAT)
         if self.Lambda_FB is not None:
-            self.Lambda_FB += lr_FB * ((((1/(1+Y))) * (Y*y_FB)).mean(dim=0, keepdim=True) - self.Lambda_FB*self.time_alpha)
-        # breakpoint()
+            self.Lambda_FB.update(Y, y_FB)
 
 if __name__ == "__main__":
     # Example usage

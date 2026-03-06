@@ -9,38 +9,49 @@ from cc.ml.heads.task_head import TaskHead
 from cc.ml.cc_modules import CCModule
 from cc.datasets.msmnist import msmnist, visualize_msmnist_examples
 
-class hRCNN(nn.Module):
+class COALANet(nn.Module):
     '''
-    hRCNN architecture collapses a pretrained CNN autoencoder into a recurrent CNN 
+    COALA-Net:
+    Collapsed Autoencoder with Local Adaptation
+        Hierarchical CNN architecture collapses a pretrained CNN autoencoder into a recurrent CNN 
         by reusing (and freezing) the encoder (feedforward) and decoder (feedback) weights.
     '''
     def __init__(self, encoder:SparseCNNEncoder, decoder:SparseCNNDecoder, head:TaskHead, 
                  data_dims:tuple[int, int] = (1,28,28), config:dict = {}):
-        super(hRCNN, self).__init__()
+        super(COALANet, self).__init__()
         self.data_dims, self.config = data_dims, config
         
-        # Load the pre-trained encoder, decoder, and head weights into the hRCNN architecture
+        # Load the pre-trained encoder, decoder, and head weights into the COALANet architecture
         self._load_pretrained(encoder, decoder, head)
 
         # Define hierarchical recurrent layers
         self._define_hierarchical_layers()
 
+        self.dynamic_updates = True
+        self.training_params = False
+
+        self.eval() # by default keep all parameters frozen
+
     def forward(self, x:torch.Tensor)->torch.Tensor:
         ''''
         Expects tensor with temporal dimension of shape (B, T, C, H, W).
+        Returns outputs for each timestep in the batch
         '''
         # Initialize hidden state (all layers start with zero hidden state)
         Y_old_activations = {f'L{i}': torch.zeros((x.shape[0], *l.dims_), device=x.device, dtype=x.dtype) 
                              for i, l in enumerate(self.cc_layers)}
-        logs = []
+        outputs = []
         for t in range(x.shape[1]): # iterate over time dimension
             Y_new_activations = {f'L{i}': None  for i in range(self.n_layers)}
             yff = x[:, t, ...]
             # Process all recurrent layers at once
             for il, layer in enumerate(self.cc_layers):
                 yfb = Y_old_activations.get(f'L{il+1}', None) 
-                Y_new_activations[f'L{il}'] = layer(yff, yfb, Y_old_activations[f'L{il}'], 
-                                                    train = True)
+                outputs = layer(yff, yfb, Y_old_activations[f'L{il}'])
+                Y_new_activations[f'L{il}'] = outputs[0]
+                if self.dynamic_updates:
+                    layer.update(*outputs)
+
                 # Feed current-step activation to the next (higher) layer.
                 yff = Y_new_activations[f'L{il}']
             # Pass output to head from current-step top-layer activations.
@@ -49,8 +60,8 @@ class hRCNN(nn.Module):
             out = self.head(top_state)
             # Update activations for all layers at once
             Y_old_activations.update(Y_new_activations)
-            logs.append(out)
-        return logs
+            outputs.append(out)
+        return outputs
 
     def _define_hierarchical_layers(self)->None:
         self.n_layers = len(self.ff_local_processing) # number of hierarchical layers based on the feedforward local processing stages
@@ -164,8 +175,8 @@ class FB_Conv2d(nn.Module):
         x = self.local_processing(x)
         return x
 
-# --- hRCNN utils ---
-def load_pretrained_weights()->hRCNN:
+# --- COALANet utils ---
+def load_pretrained_weights()->COALANet:
     # Define pre-trained autoencoder model
     mae_model = SparseCNNUNet(num_input_channels=1, num_output_channels=1, num_filters=32)
     # Load pre-trained autoencoder weights (replace with actual checkpoint path)
@@ -187,22 +198,22 @@ def load_pretrained_weights()->hRCNN:
     # Extract the classifier head
     mnist_classifier_head = mnist_classifier.head
 
-    # Instantiate hRCNN with the loaded encoder, decoder, and head
-    model = hRCNN(encoder, decoder, mnist_classifier_head)
+    # Instantiate COALANet with the loaded encoder, decoder, and head
+    model = COALANet(encoder, decoder, mnist_classifier_head)
 
     return model
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
-    hrcnn = load_pretrained_weights()
+    coalanet = load_pretrained_weights()
     examples, labels = visualize_msmnist_examples(num_examples=32, 
                                                   number_of_masks=100, timesteps_per_mask=1,
                                                   mask_ratio=0.8,
                                                   masked_fill=0.0,
                                                   accepted_digits=[3], show=True)
     with torch.no_grad():
-        logs = hrcnn(examples)
+        logs = coalanet(examples)
     # logs is a list[T] of tensors with shape (B, num_classes)
     logits = torch.stack(logs, dim=1)  # (B, T, num_classes)
     probs = torch.softmax(logits, dim=-1)
@@ -232,4 +243,4 @@ if __name__ == "__main__":
     axes[-1].set_xticks(timesteps[::tick_step])
     fig.tight_layout()
     plt.show()
-    # breakpoint()
+    
