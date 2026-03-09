@@ -24,7 +24,8 @@ class MAE(pl.LightningModule):
         masked_loss_weight: float,
         num_input_channels: int = 1,
         decoder_densify_mode: str = "random",
-        use_skip: bool = True
+        use_skip: bool = True,
+        upconv_method: str = "transposed_conv",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -34,6 +35,7 @@ class MAE(pl.LightningModule):
             num_filters=num_filters,
             decoder_densify_mode=decoder_densify_mode,
             use_skip=use_skip,
+            upconv_method=upconv_method
         )
 
     def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
@@ -177,6 +179,7 @@ def train_mae(args):
         num_input_channels=args.num_input_channels,
         decoder_densify_mode=args.decoder_densify_mode,
         use_skip=args.no_skip,
+        upconv_method=args.upconv_method,
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -199,6 +202,8 @@ if __name__ == "__main__":
         type=str,
         help="How sparse encoder features are filled before decoder local processing.",
     )
+    parser.add_argument("--upconv_method", default="upsample+conv", choices=("transposed_conv", "upsample+conv"), type=str,
+                        help="Whether to use transposed convolutions or upsample+conv in the decoder.")
     parser.add_argument("--num_input_channels", default=1, type=int,
                         help="Number of image channels (1 for MNIST/FashionMNIST, 3 for CIFAR/SVHN).")
     parser.add_argument("--no_skip", action="store_false", help="Whether to use skip connections in the decoder.")

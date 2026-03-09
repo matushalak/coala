@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Literal
 
 def downsample_center_mask(
@@ -151,21 +152,44 @@ class DenseUpConv2d(nn.Module):
         - upsameple (nearest / bilinear) + regular convolution (learned weights for FB inputs)
     """
 
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, 
+    def __init__(self, in_channels: int, out_channels: int, 
+                 kernel_size: int = 3, stride: int = 2, padding: int = 1, output_padding: int = 1,
                  method: Literal['transposed_conv', 'upsample+conv'] = "transposed_conv"):
         super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
+        self.stride = (stride, stride) if isinstance(stride, int) else stride
+        self.padding = (padding, padding) if isinstance(padding, int) else padding
+        self.output_padding = (
+            (output_padding, output_padding) if isinstance(output_padding, int) else output_padding
+        )
+        self.method = method
         if method == "transposed_conv":
             self.upconv = nn.ConvTranspose2d(
-                in_channels, out_channels, kernel_size=kernel_size, padding=1, stride=2, output_padding=1
+                in_channels, out_channels, kernel_size=kernel_size, padding=padding, stride=stride, output_padding=output_padding
             )
         elif method == "upsample+conv":
-            self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=1)
-            self.upconv = nn.Sequential(self.upsample, self.conv)
+            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2)
+            self.upconv = self.conv
         else:
             raise ValueError(f"Unsupported upsampling method: {method!r}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.method == "upsample+conv":
+            target_h = (
+                (x.shape[-2] - 1) * self.stride[0]
+                - 2 * self.padding[0]
+                + self.kernel_size[0]
+                + self.output_padding[0]
+            )
+            target_w = (
+                (x.shape[-1] - 1) * self.stride[1]
+                - 2 * self.padding[1]
+                + self.kernel_size[1]
+                + self.output_padding[1]
+            )
+            x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=True)
         return self.upconv(x)
 
 
@@ -268,15 +292,18 @@ class SparseCNNDecoder(nn.Module):
         self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=False, kernel_size=3)
         
         # V3
-        self.up4_to_7 = nn.ConvTranspose2d(c4, c7, kernel_size=3, output_padding=0, padding=1, stride=2)
+        # self.up4_to_7 = nn.ConvTranspose2d(c4, c7, kernel_size=3, output_padding=0, padding=1, stride=2)
+        self.up4_to_7 = DenseUpConv2d(c4, c7, kernel_size=3, padding=1, stride=2, output_padding=0, method=conv_method)
         self.local7 = DenseLocalStage(c7, spatial_dim=(7, 7), use_residual=True, kernel_size=3)
 
         # V2
-        self.up7_to_14 = nn.ConvTranspose2d(c7, c14, kernel_size=3, output_padding=1, padding=1, stride=2)
+        # self.up7_to_14 = nn.ConvTranspose2d(c7, c14, kernel_size=3, output_padding=1, padding=1, stride=2)
+        self.up7_to_14 = DenseUpConv2d(c7, c14, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
         self.local14 = DenseLocalStage(c14, spatial_dim=(14, 14), use_residual=True, kernel_size=3)
 
         # V1
-        self.up14_to_28 = nn.ConvTranspose2d(c14,c28,kernel_size=3,output_padding=1,padding=1,stride=2,)
+        # self.up14_to_28 = nn.ConvTranspose2d(c14,c28,kernel_size=3,output_padding=1,padding=1,stride=2,)
+        self.up14_to_28 = DenseUpConv2d(c14, c28, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
         self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=3)
 
         # Predict output (retina)        
@@ -339,7 +366,8 @@ class SparseCNNUNet(nn.Module):
         num_output_channels: int = 1,
         num_filters: int = 32,
         decoder_densify_mode: str = "random",
-        use_skip:bool = True
+        use_skip:bool = True,
+        upconv_method: Literal['transposed_conv', 'upsample+conv'] = "transposed_conv"
     ):
         super().__init__()
         self.encoder = SparseCNNEncoder(num_input_channels=num_input_channels, num_filters=num_filters)
@@ -347,7 +375,8 @@ class SparseCNNUNet(nn.Module):
             num_output_channels=num_output_channels,
             num_filters=num_filters,
             densify_mode=decoder_densify_mode,
-            use_skip=use_skip
+            use_skip=use_skip,
+            conv_method=upconv_method
             )
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:

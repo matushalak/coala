@@ -52,6 +52,7 @@ class ClassifierHead(TaskHead):
         num_input_channels: int = 1,
         num_filters: int = 32,
         map_location: str | torch.device = "cpu",
+        upconv_method: str = "transposed_conv",
     ):
         checkpoint = torch.load(checkpoint_path, map_location=map_location)
         hparams = checkpoint.get("hyper_parameters", {})
@@ -62,6 +63,7 @@ class ClassifierHead(TaskHead):
             num_input_channels=num_input_channels,
             num_output_channels=num_input_channels,
             num_filters=num_filters,
+            upconv_method=upconv_method,
         )
         state_dict = checkpoint.get("state_dict", checkpoint)
         if any(k.startswith("model.") for k in state_dict):

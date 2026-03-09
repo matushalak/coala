@@ -32,6 +32,7 @@ class COALANet(nn.Module):
 
         self.eval() # by default keep all parameters frozen
 
+    @torch.no_grad()
     def forward(self, x:torch.Tensor)->torch.Tensor:
         ''''
         Expects tensor with temporal dimension of shape (B, T, C, H, W).
@@ -40,17 +41,17 @@ class COALANet(nn.Module):
         # Initialize hidden state (all layers start with zero hidden state)
         Y_old_activations = {f'L{i}': torch.zeros((x.shape[0], *l.dims_), device=x.device, dtype=x.dtype) 
                              for i, l in enumerate(self.cc_layers)}
-        outputs = []
+        logits_per_timestep = []
         for t in range(x.shape[1]): # iterate over time dimension
             Y_new_activations = {f'L{i}': None  for i in range(self.n_layers)}
             yff = x[:, t, ...]
             # Process all recurrent layers at once
             for il, layer in enumerate(self.cc_layers):
                 yfb = Y_old_activations.get(f'L{il+1}', None) 
-                outputs = layer(yff, yfb, Y_old_activations[f'L{il}'])
-                Y_new_activations[f'L{il}'] = outputs[0]
+                layer_outputs = layer(yff, yfb, Y_old_activations[f'L{il}'])
+                Y_new_activations[f'L{il}'] = layer_outputs[0]
                 if self.dynamic_updates:
-                    layer.update(*outputs)
+                    layer.update(*layer_outputs)
 
                 # Feed current-step activation to the next (higher) layer.
                 yff = Y_new_activations[f'L{il}']
@@ -60,8 +61,8 @@ class COALANet(nn.Module):
             out = self.head(top_state)
             # Update activations for all layers at once
             Y_old_activations.update(Y_new_activations)
-            outputs.append(out)
-        return outputs
+            logits_per_timestep.append(out)
+        return logits_per_timestep
 
     def _define_hierarchical_layers(self)->None:
         self.n_layers = len(self.ff_local_processing) # number of hierarchical layers based on the feedforward local processing stages
@@ -139,6 +140,29 @@ class COALANet(nn.Module):
                 param.requires_grad = False
             self.head.eval()
 
+    def iter_cc_modules(self):
+        return iter(self.cc_layers)
+
+    def adaptation_parameters(self):
+        params = []
+        for layer in self.cc_layers:
+            params.append(layer.time_alpha)
+            params.append(layer.Lambda_FF.raw_lr)
+            params.append(layer.Lambda_LAT.raw_lr)
+            if layer.Lambda_FB is not None:
+                params.append(layer.Lambda_FB.raw_lr)
+        return params
+
+    def set_adaptation_trainable(self, trainable:bool = True)->None:
+        self.training_params = False
+        for param in self.parameters():
+            param.requires_grad = False
+        self.eval()
+
+    def reset_dynamic_state(self, ref_tensor:torch.Tensor|None = None)->None:
+        for layer in self.cc_layers:
+            layer.reset_dynamic_state(ref_tensor=ref_tensor)
+
 class FF_Conv2d(nn.Module):
     ''''
     Downsampling convolution + local processing
@@ -178,9 +202,10 @@ class FB_Conv2d(nn.Module):
 # --- COALANet utils ---
 def load_pretrained_weights()->COALANet:
     # Define pre-trained autoencoder model
-    mae_model = SparseCNNUNet(num_input_channels=1, num_output_channels=1, num_filters=32)
+    mae_model = SparseCNNUNet(num_input_channels=1, num_output_channels=1, num_filters=32,
+                              upconv_method="upsample+conv")
     # Load pre-trained autoencoder weights (replace with actual checkpoint path)
-    mae_checkpoint_path = f"{MAE_logs}/version_12/checkpoints/epoch=15-step=6752.ckpt"
+    mae_checkpoint_path = f"{MAE_logs}/version_13/checkpoints/epoch=19-step=8440.ckpt"
     load_checkpoint(mae_model, mae_checkpoint_path)
     encoder:SparseCNNEncoder = mae_model.encoder
     decoder:SparseCNNDecoder = mae_model.decoder
@@ -191,9 +216,10 @@ def load_pretrained_weights()->COALANet:
         num_classes=10, # MNIST has 10 classes
         latent_dim=32*4, # latent dimension from the MAE model 
         lr=1e-3,
-        freeze_encoder=True)
+        freeze_encoder=True,
+        upconv_method = 'upsample+conv')
     # Load pre-trained classifier weights
-    classifier_checkpoint_path = f"{Classifier_logs}/version_22/checkpoints/epoch=9-step=4220.ckpt"
+    classifier_checkpoint_path = f"{Classifier_logs}/version_23/checkpoints/epoch=9-step=4220.ckpt"
     load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False)
     # Extract the classifier head
     mnist_classifier_head = mnist_classifier.head
@@ -203,34 +229,41 @@ def load_pretrained_weights()->COALANet:
 
     return model
 
-if __name__ == "__main__":
+
+def stack_temporal_logits(logits:list[torch.Tensor] | torch.Tensor)->torch.Tensor:
+    if isinstance(logits, torch.Tensor):
+        if logits.dim() != 3:
+            raise ValueError(f"Expected logits tensor of shape (B, T, C), got {tuple(logits.shape)}.")
+        return logits
+    return torch.stack(logits, dim=1)
+
+
+def create_temporal_prediction_figure(
+    logits:list[torch.Tensor] | torch.Tensor,
+    labels:torch.Tensor,
+    max_examples:int|None = None,
+):
     import matplotlib.pyplot as plt
 
-    coalanet = load_pretrained_weights()
-    examples, labels = visualize_msmnist_examples(num_examples=32, 
-                                                  number_of_masks=100, timesteps_per_mask=1,
-                                                  mask_ratio=0.8,
-                                                  masked_fill=0.0,
-                                                  accepted_digits=[3], show=True)
-    with torch.no_grad():
-        logs = coalanet(examples)
-    # logs is a list[T] of tensors with shape (B, num_classes)
-    logits = torch.stack(logs, dim=1)  # (B, T, num_classes)
+    logits = stack_temporal_logits(logits).detach().cpu()
+    labels = labels.detach().cpu()
+    if max_examples is not None:
+        logits = logits[:max_examples]
+        labels = labels[:max_examples]
+
     probs = torch.softmax(logits, dim=-1)
-    preds = probs.argmax(dim=-1)  # (B, T)
+    preds = probs.argmax(dim=-1)
     timesteps = torch.arange(logits.shape[1]).cpu().numpy()
     tick_step = max(1, logits.shape[1] // 12)
-    # print("labels:", labels.tolist())
-    # print("preds per sample/time:", preds.tolist())
-    # breakpoint()
     fig_width = min(18.0, max(10.0, 0.35 * logits.shape[1]))
     fig, axes = plt.subplots(labels.shape[0], 1, figsize=(fig_width, 2.2 * labels.shape[0]), sharex=True)
     if labels.shape[0] == 1:
         axes = [axes]
+
     for i, ax in enumerate(axes):
         true_label = int(labels[i].item())
-        true_prob = probs[i, :, true_label].cpu().numpy()
-        pred_prob = probs[i].max(dim=-1).values.cpu().numpy()
+        true_prob = probs[i, :, true_label].numpy()
+        pred_prob = probs[i].max(dim=-1).values.numpy()
         ax.plot(timesteps, true_prob, marker="o", label=f"P(true={true_label})")
         ax.plot(timesteps, pred_prob, marker="x", linestyle="--", label="P(pred)")
         ax.set_xlim(0, logits.shape[1] - 1)
@@ -242,5 +275,19 @@ if __name__ == "__main__":
     axes[-1].set_xlabel("time step")
     axes[-1].set_xticks(timesteps[::tick_step])
     fig.tight_layout()
+    return fig
+
+if __name__ == "__main__":
+    coalanet = load_pretrained_weights()
+    # TODO: bake-in processing each frame for T internal time-steps
+    examples, labels = visualize_msmnist_examples(num_examples=1, 
+                                                  number_of_masks=20, timesteps_per_mask=1,
+                                                  mask_ratio=0.8,
+                                                  masked_fill='random',
+                                                  accepted_digits=None, show=True)
+    with torch.no_grad():
+        logits = stack_temporal_logits(coalanet(examples))
+    fig = create_temporal_prediction_figure(logits, labels)
+    import matplotlib.pyplot as plt
     plt.show()
     
