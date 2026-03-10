@@ -281,8 +281,8 @@ if __name__ == "__main__":
     coalanet = load_pretrained_weights()
     # TODO: bake-in processing each frame for T internal time-steps
     examples, labels = visualize_msmnist_examples(num_examples=1, 
-                                                  number_of_masks=20, timesteps_per_mask=1,
-                                                  mask_ratio=0.8,
+                                                  number_of_masks=1, timesteps_per_mask=50,
+                                                  mask_ratio=0.2,
                                                   masked_fill='random',
                                                   accepted_digits=None, show=True)
     with torch.no_grad():

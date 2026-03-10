@@ -10,6 +10,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from cc.datasets.mnist import mnist
 from cc.ml.sparse_cnn_unet import SparseCNNUNet
 
+# TODO: experiment with variable masking ratio per batch
 class MAE(pl.LightningModule):
     """
     Bare-bones CNN masked autoencoder for normalized images.

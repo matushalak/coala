@@ -192,6 +192,48 @@ class DenseUpConv2d(nn.Module):
             x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=True)
         return self.upconv(x)
 
+# TODO: check with paper and integrate into encoder
+class SparseGlobalResponseNorm(nn.Module):
+    """
+    (sparse) Global response normalization (GRN) as used in ConvNeXtV2.
+        GRN normalizes each channel by the global L2 norm across spatial dimensions, 
+        with learnable scaling and bias.
+    """
+
+    def __init__(self, n_channels: int, eps: float = 1e-6):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(1, n_channels, 1, 1))
+        self.beta = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor, keep_mask:torch.BoolTensor) -> torch.Tensor:
+        # L2 norm "pooling" across spatial dimensions
+        gx = torch.sqrt(x.pow(2).sum(dim=[2, 3], keepdim=True) + self.eps)
+        # Competition across channels
+        nx = gx / (gx.mean(dim=-1, keepdim=True) + self.eps)
+        # Apply scaling and bias
+        out = self.gamma * (x * nx) + self.beta + x
+        return out * keep_mask.to(dtype=out.dtype)
+
+
+class SparseNormalizedFusion(nn.Module):
+    """
+    Normalization gate for fusing FF and FB streams
+    """
+    def __init__(self, n_channels: int, spatial_dim:tuple[int, int]):
+        super().__init__()
+        self.grn = SparseGlobalResponseNorm(n_channels, eps=1e-6)
+        self.norm = SparseLayerNorm2d((n_channels, *spatial_dim))
+    
+    def forward(self, x: torch.Tensor, keep_mask:torch.BoolTensor)->torch.Tensor:
+        x = self.grn(x, keep_mask)
+        x = self.norm(x, keep_mask)
+        return x
+
+
+
+
+
 
 class SparseCNNEncoder(nn.Module):
     """

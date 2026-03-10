@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Literal
 
+# TODO: remove lateral inhibition
 class LateralInhibition(nn.Module):
     """
     Lateral inhibition convolution with channel+spatial averaging kernel.
