@@ -279,10 +279,12 @@ def create_temporal_prediction_figure(
 
 if __name__ == "__main__":
     coalanet = load_pretrained_weights()
-    # TODO: bake-in processing each frame for T internal time-steps
+    # ablation results
+    # can perform just as well (and mostly better with leaky integration of FF weights)
+    # TODO: need to measure success rate systematically with loss from COALAmodel
     examples, labels = visualize_msmnist_examples(num_examples=1, 
-                                                  number_of_masks=1, timesteps_per_mask=50,
-                                                  mask_ratio=0.2,
+                                                  number_of_masks=200, timesteps_per_mask=1,
+                                                  mask_ratio=0.5,
                                                   masked_fill='random',
                                                   accepted_digits=None, show=True)
     with torch.no_grad():

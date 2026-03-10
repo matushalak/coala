@@ -104,7 +104,7 @@ class CCModule(nn.Module):
     '''
     def __init__(self, spatial_dims:tuple[int, int], FF_conv:nn.Conv2d, FB_conv:nn.Conv2d|None, 
                  LAT_ksize:tuple[int, int] = (3,3), activation_fn:nn.Module = nn.Identity(),
-                 time_alpha:float|torch.Tensor | None = 0.2
+                 time_alpha:float|torch.Tensor | None = 0.1
                  ):
         super().__init__()
         assert FF_conv is not None, "Feedforward convolution layer (FF_conv) must be provided."
@@ -117,7 +117,9 @@ class CCModule(nn.Module):
         # Define dynamic lambdas for individual synapses (3-compartment neuron)
         self.Lambda_FF = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
                                       init_Lambda=0.0, init_lr=5e-3, plus_one=True,
-                                      learning_rule='anti_hebbian')
+                                      learning_rule='anti_hebbian'
+                                    #   learning_rule='hebbian'
+                                      )
         
         if FB_conv is not None:
             self.Lambda_FB = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
@@ -164,14 +166,15 @@ class CCModule(nn.Module):
         # Combine contributions with dynamic lambdas
         drive = self.Lambda_FF(y_FF)
 
-        if Y_old is not None:
-            y_LAT = self.LAT_conv(Y_old)
-            drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
-
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
             y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
-            drive += self.Lambda_FB(y_FB)
+            # drive += self.Lambda_FB(y_FB)
+            # drive /= 2
 
+        # if Y_old is not None:
+        y_LAT = self.LAT_conv(drive)
+        # drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
+        
         # Apply activation function (drive term)
         drive = self.activation_fn(drive)
 
@@ -179,7 +182,6 @@ class CCModule(nn.Module):
         if Y_old is None:
             Y = drive
         else:
-            # Y = Y_old + self.sigmoid(self.time_alpha) * (drive - Y_old)
             Y = Y_old + self.time_alpha * (drive - Y_old)
         
         return Y, y_FF, y_FB, y_LAT # return all drives for local update
@@ -190,7 +192,7 @@ class CCModule(nn.Module):
         ''''
         Local update, leaks back to 0; average over batch
         '''
-        self.Lambda_FF.update(Y, y_FF)
+        # self.Lambda_FF.update(Y, y_FF)
         self.Lambda_LAT.update(Y, y_LAT)
         if self.Lambda_FB is not None:
             self.Lambda_FB.update(Y, y_FB)
