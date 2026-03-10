@@ -143,7 +143,7 @@ class DenseResidualConv2d(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.block(x)
     
-# TODO: integrate this option into the decoder
+
 class DenseUpConv2d(nn.Module):
     """
     Upsampling for decoder dense feature maps.
@@ -192,7 +192,7 @@ class DenseUpConv2d(nn.Module):
             x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=True)
         return self.upconv(x)
 
-# TODO: check with paper and integrate into encoder
+
 class SparseGlobalResponseNorm(nn.Module):
     """
     (sparse) Global response normalization (GRN) as used in ConvNeXtV2.
@@ -231,10 +231,6 @@ class SparseNormalizedFusion(nn.Module):
         return x
 
 
-
-
-
-
 class SparseCNNEncoder(nn.Module):
     """
     MNIST-sized sparse encoder (28 -> 14 -> 7 -> 4).
@@ -250,18 +246,22 @@ class SparseCNNEncoder(nn.Module):
         # V1
         self.down28_to_28 = SparseConv2d(num_input_channels, num_filters // 2, kernel_size=3, padding=1, stride=1)
         self.local28 = SparseLocalStage(num_filters // 2, spatial_dim=(28, 28), use_residual=True, kernel_size=3)
+        self.normalizer28 = SparseNormalizedFusion(n_channels=num_filters // 2, spatial_dim=(28, 28))
 
         # V2
         self.down28_to_14 = SparseConv2d(num_filters // 2, num_filters, kernel_size=3, padding=1, stride=2)
         self.local14 = SparseLocalStage(num_filters, spatial_dim=(14, 14), use_residual=True, kernel_size=3)
+        self.normalizer14 = SparseNormalizedFusion(n_channels=num_filters, spatial_dim=(14, 14))
 
         # V3
         self.down14_to_7 = SparseConv2d(num_filters, 2 * num_filters, kernel_size=3, padding=1, stride=2)
         self.local7 = SparseLocalStage(2 * num_filters, spatial_dim=(7, 7), use_residual=True, kernel_size=3)
+        self.normalizer7 = SparseNormalizedFusion(n_channels=2 * num_filters, spatial_dim=(7, 7))
 
         # V4
         self.down7_to_4 = SparseConv2d(2 * num_filters, 4 * num_filters, kernel_size=3, padding=1, stride=2)
         self.local4 = SparseLocalStage(4 * num_filters, spatial_dim=(4, 4), use_residual=False, kernel_size=3)
+        self.normalizer4 = SparseNormalizedFusion(n_channels=4 * num_filters, spatial_dim=(4, 4))
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> dict[str, torch.Tensor]:
         x = x.float()
@@ -270,18 +270,22 @@ class SparseCNNEncoder(nn.Module):
 
         x = self.down28_to_28(x, keep_mask)
         x28 = self.local28(x, keep_mask)
+        x28 = self.normalizer28(x28, keep_mask)
 
         mask14 = downsample_center_mask(keep_mask, (14, 14), stride=2)
         x14 = self.down28_to_14(x28, mask14)
         x14 = self.local14(x14, mask14)
+        x14 = self.normalizer14(x14, mask14)
 
         mask7 = downsample_center_mask(mask14, (7, 7), stride=2)
         x7 = self.down14_to_7(x14, mask7)
         x7 = self.local7(x7, mask7)
+        x7 = self.normalizer7(x7, mask7)
 
         mask4 = downsample_center_mask(mask7, (4, 4), stride=2)
         x4 = self.down7_to_4(x7, mask4)
         x4 = self.local4(x4, mask4)
+        x4 = self.normalizer4(x4, mask4)
         
         return {
             "feat28": x28,
@@ -332,21 +336,25 @@ class SparseCNNDecoder(nn.Module):
 
         # V4
         self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=False, kernel_size=3)
-        
+        self.mask_conv4 = nn.Conv2d(c4, 1, kernel_size=3, padding=1)
+
         # V3
         # self.up4_to_7 = nn.ConvTranspose2d(c4, c7, kernel_size=3, output_padding=0, padding=1, stride=2)
         self.up4_to_7 = DenseUpConv2d(c4, c7, kernel_size=3, padding=1, stride=2, output_padding=0, method=conv_method)
         self.local7 = DenseLocalStage(c7, spatial_dim=(7, 7), use_residual=True, kernel_size=3)
+        self.mask_conv7 = nn.Conv2d(c7, 1, kernel_size=3, padding=1)
 
         # V2
         # self.up7_to_14 = nn.ConvTranspose2d(c7, c14, kernel_size=3, output_padding=1, padding=1, stride=2)
         self.up7_to_14 = DenseUpConv2d(c7, c14, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
         self.local14 = DenseLocalStage(c14, spatial_dim=(14, 14), use_residual=True, kernel_size=3)
-
+        self.mask_conv14 = nn.Conv2d(c14, 1, kernel_size=3, padding=1)
+        
         # V1
         # self.up14_to_28 = nn.ConvTranspose2d(c14,c28,kernel_size=3,output_padding=1,padding=1,stride=2,)
         self.up14_to_28 = DenseUpConv2d(c14, c28, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
         self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=3)
+        self.mask_conv28 = nn.Conv2d(c28, 1, kernel_size=3, padding=1)
 
         # Predict output (retina)        
         self.up28_to_out = nn.Conv2d(c28, num_output_channels, kernel_size=3, padding=1, stride=1)
@@ -373,26 +381,31 @@ class SparseCNNDecoder(nn.Module):
     def forward(self, enc_out: dict[str, torch.Tensor]) -> torch.Tensor:
         dense4 = self._densify(enc_out["feat4"], enc_out["mask4"], self.mask_token4)
         x = self.local4(dense4)
-        x = self.up4_to_7(x)
+        m4 = self.mask_conv4(x)
         
+        x = self.up4_to_7(x)
         if self.use_skip:
             dense7_skip = self._densify(enc_out["feat7"], enc_out["mask7"], self.mask_token7)
             x = x + dense7_skip
         x = self.local7(x)
-        x = self.up7_to_14(x)
+        m7 = self.mask_conv7(x)
         
+        x = self.up7_to_14(x)
         if self.use_skip:
             dense14_skip = self._densify(enc_out["feat14"], enc_out["mask14"], self.mask_token14)
             x = x + dense14_skip
         x = self.local14(x)
-        x = self.up14_to_28(x)
+        m14 = self.mask_conv14(x)
         
+        x = self.up14_to_28(x)
         if self.use_skip:
             dense28_skip = self._densify(enc_out["feat28"], enc_out["mask28"], self.mask_token28)
             x = x + dense28_skip
         x = self.local28(x)
+        m28 = self.mask_conv28(x)
+        
         x = self.up28_to_out(x)
-        return x
+        return x, {"mask4": m4, "mask7": m7, "mask14": m14, "mask28": m28}
 
     @property
     def device(self):
@@ -423,7 +436,47 @@ class SparseCNNUNet(nn.Module):
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
         enc_out = self.encoder(x, keep_mask=keep_mask)
-        return self.decoder(enc_out)
+        recon, pred_masks = self.decoder(enc_out)
+        return recon, pred_masks, {k:v for k,v in enc_out.items() if "mask" in k} 
 
     def set_decoder_densify_mode(self, mode: str) -> None:
         self.decoder.set_densify_mode(mode)
+
+
+class FF_Conv2d(nn.Module):
+    ''''
+    Downsampling convolution + local processing
+    '''
+    def __init__(self, conv:SparseConv2d, local_processing:SparseLocalStage):
+        super(FF_Conv2d, self).__init__()
+        self.conv = conv
+        self.local_processing = local_processing
+        self.out_channels = conv.out_channels
+
+    def forward(self, x:torch.Tensor, keep_mask:torch.Tensor)->torch.Tensor:
+        x = self.conv(x, keep_mask)
+        x = self.local_processing(x, keep_mask)
+        return x
+
+
+class FB_Conv2d(nn.Module):
+    '''
+    Upsampling convolution + local processing (w optional skip connection)
+    '''
+    def __init__(self, upconv:nn.ConvTranspose2d|DenseUpConv2d, local_processing:DenseLocalStage, 
+                 local_processing0:DenseLocalStage|None = None):
+        super(FB_Conv2d, self).__init__()
+        self.upconv = upconv
+        self.local_processing = local_processing
+        self.local_processing0 = local_processing0
+        self.out_channels = upconv.out_channels
+
+    def forward(self, x:torch.Tensor, skip:torch.Tensor|None)->torch.Tensor:
+        if self.local_processing0 is not None:
+            x = self.local_processing0(x)
+        x = self.upconv(x)
+        if skip is not None:
+            x = x + skip
+        x = self.local_processing(x)
+        return x
+    

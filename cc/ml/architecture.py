@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
 
-from cc.ml.sparse_cnn_unet import SparseCNNEncoder, SparseCNNDecoder, SparseCNNUNet, SparseLocalStage, DenseLocalStage, DenseUpConv2d, SparseConv2d
+from cc.ml.sparse_cnn_unet import SparseCNNEncoder, SparseCNNDecoder, SparseCNNUNet, SparseLocalStage, DenseLocalStage, DenseUpConv2d, SparseConv2d, FF_Conv2d, FB_Conv2d, SparseNormalizedFusion
 from cc.ml import MAE_logs, Classifier_logs
 from cc.ml.utils import load_checkpoint
 from cc.ml.heads.classifier import ClassifierHead
 from cc.ml.heads.task_head import TaskHead
 from cc.ml.cc_modules import CCModule
+from cc.ml.local_modules import LocalIntegrationModule
 from cc.datasets.msmnist import msmnist, visualize_msmnist_examples
 
 class COALANet(nn.Module):
@@ -41,6 +42,7 @@ class COALANet(nn.Module):
         # Initialize hidden state (all layers start with zero hidden state)
         Y_old_activations = {f'L{i}': torch.zeros((x.shape[0], *l.dims_), device=x.device, dtype=x.dtype) 
                              for i, l in enumerate(self.cc_layers)}
+        keep_masks = {f'L{i}': None for i in range(self.n_layers)}
         logits_per_timestep = []
         for t in range(x.shape[1]): # iterate over time dimension
             Y_new_activations = {f'L{i}': None  for i in range(self.n_layers)}
@@ -48,10 +50,13 @@ class COALANet(nn.Module):
             # Process all recurrent layers at once
             for il, layer in enumerate(self.cc_layers):
                 yfb = Y_old_activations.get(f'L{il+1}', None) 
-                layer_outputs = layer(yff, yfb, Y_old_activations[f'L{il}'])
+                layer_outputs = layer(yff, yfb, Y_old_activations[f'L{il}'],
+                                      keep_mask=keep_masks[f'L{il}'])
                 Y_new_activations[f'L{il}'] = layer_outputs[0]
-                if self.dynamic_updates:
-                    layer.update(*layer_outputs)
+                keep_masks[f'L{il}'] = layer_outputs[1]
+                
+                # if self.dynamic_updates:
+                #     layer.update(*layer_outputs)
 
                 # Feed current-step activation to the next (higher) layer.
                 yff = Y_new_activations[f'L{il}']
@@ -94,7 +99,11 @@ class COALANet(nn.Module):
             FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local, local_processing0=FB_local0
                                 ) if FB_upconv is not None else None
             print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
-            layer = CCModule(spatial_dim, FF_conv, FB_conv)
+            # layer = CCModule(spatial_dim, FF_conv, FB_conv) # CC version
+            layer = LocalIntegrationModule(spatial_dim, 
+                                           FF_conv, FB_conv, 
+                                           self.ff_fusion_modules[f"normalizer{dst}"],
+                                           self.fb_mask_convs[f"mask_conv{dst}"])
             self.cc_layers.append(layer)
             src = dst
         
@@ -108,13 +117,16 @@ class COALANet(nn.Module):
             encoder.eval()
         self.ff_local_processing = {}
         self.ff_downsample_convs = {}
+        self.ff_fusion_modules = {}
         
         for name, module in (encoder.named_modules()):
             if isinstance(module, SparseLocalStage):
                 self.ff_local_processing[name] = module
-            elif isinstance(module, nn.Conv2d) and (module.stride == (2, 2) or 'down' in name):
+            elif isinstance(module, nn.Conv2d) and 'down' in name:
                 self.ff_downsample_convs[name] = module
-        
+            if isinstance(module, SparseNormalizedFusion):
+                self.ff_fusion_modules[name] = module
+
         # Extract feedback (decoder) weights
         decoder = decoder
         if freeze_decoder:
@@ -123,13 +135,16 @@ class COALANet(nn.Module):
             decoder.eval()
         self.fb_local_processing = {}
         self.fb_upsample_convs = {}
+        self.fb_mask_convs = {}
 
         for name, module in (decoder.named_modules()):
             if isinstance(module, DenseLocalStage):
                 self.fb_local_processing[name] = module
-            elif isinstance(module, (DenseUpConv2d, nn.ConvTranspose2d)) and (module.stride == (2, 2) or 'up' in name):
+            elif isinstance(module, DenseUpConv2d):
                 self.fb_upsample_convs[name] = module
-        
+            elif isinstance(module, nn.Conv2d) and 'mask_conv' in name:
+                self.fb_mask_convs[name] = module
+
         self.ff_names = list(self.ff_local_processing.keys())
         self.fb_names = list(self.fb_local_processing.keys())
 
@@ -163,49 +178,13 @@ class COALANet(nn.Module):
         for layer in self.cc_layers:
             layer.reset_dynamic_state(ref_tensor=ref_tensor)
 
-class FF_Conv2d(nn.Module):
-    ''''
-    Downsampling convolution + local processing
-    '''
-    def __init__(self, conv:SparseConv2d, local_processing:SparseLocalStage):
-        super(FF_Conv2d, self).__init__()
-        self.conv = conv
-        self.local_processing = local_processing
-        self.out_channels = conv.out_channels
-
-    def forward(self, x:torch.Tensor, keep_mask:torch.Tensor)->torch.Tensor:
-        x = self.conv(x, keep_mask)
-        x = self.local_processing(x, keep_mask)
-        return x
-
-class FB_Conv2d(nn.Module):
-    '''
-    Upsampling convolution + local processing (w optional skip connection)
-    '''
-    def __init__(self, upconv:nn.ConvTranspose2d|DenseUpConv2d, local_processing:DenseLocalStage, 
-                 local_processing0:DenseLocalStage|None = None):
-        super(FB_Conv2d, self).__init__()
-        self.upconv = upconv
-        self.local_processing = local_processing
-        self.local_processing0 = local_processing0
-        self.out_channels = upconv.out_channels
-
-    def forward(self, x:torch.Tensor, skip:torch.Tensor|None)->torch.Tensor:
-        if self.local_processing0 is not None:
-            x = self.local_processing0(x)
-        x = self.upconv(x)
-        if skip is not None:
-            x = x + skip
-        x = self.local_processing(x)
-        return x
-
 # --- COALANet utils ---
 def load_pretrained_weights()->COALANet:
     # Define pre-trained autoencoder model
     mae_model = SparseCNNUNet(num_input_channels=1, num_output_channels=1, num_filters=32,
-                              upconv_method="upsample+conv")
+                              upconv_method="transposed_conv")
     # Load pre-trained autoencoder weights (replace with actual checkpoint path)
-    mae_checkpoint_path = f"{MAE_logs}/version_13/checkpoints/epoch=19-step=8440.ckpt"
+    mae_checkpoint_path = f"{MAE_logs}/version_14/checkpoints/epoch=19-step=8440.ckpt"
     load_checkpoint(mae_model, mae_checkpoint_path)
     encoder:SparseCNNEncoder = mae_model.encoder
     decoder:SparseCNNDecoder = mae_model.decoder
@@ -217,9 +196,9 @@ def load_pretrained_weights()->COALANet:
         latent_dim=32*4, # latent dimension from the MAE model 
         lr=1e-3,
         freeze_encoder=True,
-        upconv_method = 'upsample+conv')
+        upconv_method = 'transposed_conv')
     # Load pre-trained classifier weights
-    classifier_checkpoint_path = f"{Classifier_logs}/version_23/checkpoints/epoch=9-step=4220.ckpt"
+    classifier_checkpoint_path = f"{Classifier_logs}/version_24/checkpoints/epoch=9-step=4220.ckpt"
     load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False)
     # Extract the classifier head
     mnist_classifier_head = mnist_classifier.head
@@ -281,7 +260,7 @@ if __name__ == "__main__":
     coalanet = load_pretrained_weights()
     # TODO: bake-in processing each frame for T internal time-steps
     examples, labels = visualize_msmnist_examples(num_examples=1, 
-                                                  number_of_masks=1, timesteps_per_mask=50,
+                                                  number_of_masks=20, timesteps_per_mask=5,
                                                   mask_ratio=0.2,
                                                   masked_fill='random',
                                                   accepted_digits=None, show=True)

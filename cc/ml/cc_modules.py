@@ -98,6 +98,8 @@ class LambdaModule(nn.Module):
 
 # TODO: updates should be precision-weighed (mostly use internal representations where sensory input noisy)
 # TODO: probably better ways of doing lateral inhibition
+# TODO: variance check (calculate variance in each patch and its downscaled versions)
+# use 1/ variance as precision proxy
 class CCModule(nn.Module):
     '''
     Contextual Contrasting recurrent cell module

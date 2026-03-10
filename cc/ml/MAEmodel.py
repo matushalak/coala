@@ -10,7 +10,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from cc.datasets.mnist import mnist
 from cc.ml.sparse_cnn_unet import SparseCNNUNet
 
-# TODO: experiment with variable masking ratio per batch
+
 class MAE(pl.LightningModule):
     """
     Bare-bones CNN masked autoencoder for normalized images.
@@ -65,11 +65,11 @@ class MAE(pl.LightningModule):
         self,
         imgs: torch.Tensor,
         keep_mask: torch.BoolTensor | None = None,
-    ) -> tuple[torch.Tensor, torch.BoolTensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         if keep_mask is None:
             keep_mask = self._mask(imgs)
-        recon = self.model(imgs, keep_mask=keep_mask)
-        return recon, keep_mask
+        recon, pred_masks, gt_masks = self.model(imgs, keep_mask=keep_mask)
+        return recon, keep_mask, pred_masks, gt_masks
 
     def _reconstruction_loss(self, recon: torch.Tensor, imgs: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
         per_pixel_mse = (recon - imgs).pow(2).mean(dim=1)
@@ -78,26 +78,46 @@ class MAE(pl.LightningModule):
         weighted = per_pixel_mse * weights
         per_image = weighted.sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1e-8)
         return per_image.mean()
+    
+    def _mask_loss(self, pred_masks: dict[str, torch.Tensor], gt_masks: dict[str, torch.Tensor]) -> torch.Tensor:
+        total_loss = 0
+        for level, pred in pred_masks.items():
+            target = gt_masks[level].float()
+            loss = F.binary_cross_entropy_with_logits(pred, target)
+            total_loss += loss.mean()
+        return total_loss
+    
+    def _loss(self, l_recon: torch.Tensor, l_mask: torch.Tensor) -> torch.Tensor:
+        return l_recon + l_mask
 
     def forward(self, imgs: torch.Tensor) -> torch.Tensor:
-        recon, keep_mask = self.reconstruct(imgs)
-        return self._reconstruction_loss(recon, imgs, keep_mask)
+        recon, keep_mask, pred_masks, gt_masks = self.reconstruct(imgs)
+        return self._reconstruction_loss(recon, imgs, keep_mask), self._mask_loss(pred_masks, gt_masks)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
     def training_step(self, batch, batch_idx):
-        loss = self.forward(batch[0])
-        self.log("train_reconstruction_loss", loss, on_step=False, on_epoch=True)
+        loss_recon, loss_mask = self.forward(batch[0])
+        loss = self._loss(loss_recon, loss_mask)
+        self.log("train_reconstruction_loss", loss_recon, on_step=False, on_epoch=True)
+        self.log("train_mask_loss", loss_mask, on_step=False, on_epoch=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = self.forward(batch[0])
-        self.log("val_reconstruction_loss", loss)
+        loss_recon, loss_mask = self.forward(batch[0])
+        loss = self._loss(loss_recon, loss_mask)
+        self.log("val_reconstruction_loss", loss_recon)
+        self.log("val_mask_loss", loss_mask)
+        self.log("val_loss", loss)
 
     def test_step(self, batch, batch_idx):
-        loss = self.forward(batch[0])
-        self.log("test_reconstruction_loss", loss)
+        loss_recon, loss_mask = self.forward(batch[0])
+        loss = self._loss(loss_recon, loss_mask)
+        self.log("test_reconstruction_loss", loss_recon)
+        self.log("test_mask_loss", loss_mask)
+        self.log("test_loss", loss)
 
 
 class ReconstructionCallback(pl.Callback):
@@ -124,7 +144,7 @@ class ReconstructionCallback(pl.Callback):
             return
 
         imgs = self._example_batch.to(pl_module.device)
-        recon, keep_mask = pl_module.reconstruct(imgs)
+        recon, keep_mask, _, _ = pl_module.reconstruct(imgs)
 
         original = imgs.float()
         grey = 0.5 
@@ -203,7 +223,7 @@ if __name__ == "__main__":
         type=str,
         help="How sparse encoder features are filled before decoder local processing.",
     )
-    parser.add_argument("--upconv_method", default="upsample+conv", choices=("transposed_conv", "upsample+conv"), type=str,
+    parser.add_argument("--upconv_method", default="transposed_conv", choices=("transposed_conv", "upsample+conv"), type=str,
                         help="Whether to use transposed convolutions or upsample+conv in the decoder.")
     parser.add_argument("--num_input_channels", default=1, type=int,
                         help="Number of image channels (1 for MNIST/FashionMNIST, 3 for CIFAR/SVHN).")
