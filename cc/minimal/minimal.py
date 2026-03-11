@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 from cc.utils import EMA, nonnegative, randn_reparam, ThresholdReLU
+from typing import Literal
 
 class CCNeuron(nn.Module):
     """
@@ -17,7 +18,8 @@ class CCNeuron(nn.Module):
 
     Local learning rules:
       dw_ff  ~ -(y * x)                           (anti-Hebbian)
-      dw_fb  ~ (alpha / (y + alpha)) * (y * c)   (dampened-Hebbian)
+      dw_fb  ~ (alpha / (y + alpha)) * (c)   (dampened-anti-Hebbian)
+            OR y * c (Hebbian)
       dw_lat ~  (y * p)                           (Hebbian)
       dW_pv  ~  p x^T                             (Hebbian)
     """
@@ -42,6 +44,9 @@ class CCNeuron(nn.Module):
         alpha: float = 1.0,
         weight_decay: float = 0.0,
         seed:int = 42,
+        receives_context:tuple[bool, bool ] = (True, True),
+        FFrule:Literal['anti-Hebbian', 'Hebbian'] = 'anti-Hebbian',
+        FBrule:Literal["dampened-anti-Hebbian", "Hebbian"] = "dampened-anti-Hebbian"
     ):
         super().__init__()
         if alpha <= 0:
@@ -50,6 +55,12 @@ class CCNeuron(nn.Module):
             raise ValueError("weight_decay must be 0 <= wd <= 1.")
 
         torch.manual_seed(seed) # set random seed for weight initialization
+        assert FFrule in ["anti-Hebbian", "Hebbian"], "FFrule must be either 'anti-Hebbian' or 'Hebbian'."
+        self.FFrule = FFrule
+        assert FBrule in ["dampened-anti-Hebbian", "Hebbian"], "FBrule must be either 'dampened-anti-Hebbian' or 'Hebbian'."
+        self.FBrule = FBrule
+        assert len(receives_context) == 2, "receives_context must be a tuple of two booleans indicating whether the neuron receives context input for familiar and novel conditions respectively."
+        self.receives_context = torch.tensor(receives_context, dtype=torch.bool)
 
         self.n_features = n_features
         self.n_pv = n_pv
@@ -58,7 +69,7 @@ class CCNeuron(nn.Module):
 
         # Learnable weights updated manually via local rules
         self.w_ff = nonnegative(randn_reparam(size=(1,), **w_ff_init))
-        self.w_fb = nonnegative(randn_reparam(size=(1,), **w_fb_init))
+        self.w_fb = nonnegative(randn_reparam(size=(1,), **w_fb_init)) * self.receives_context
         self.w_lat = nonnegative(randn_reparam(size=(1,), **w_lat_init))
         self.W_pv = torch.cat((
             nonnegative(randn_reparam(size=(1,), mu = W_pv_init['mu'][0],sigma = W_pv_init['sigma'][0])).unsqueeze(0),
@@ -83,6 +94,9 @@ class CCNeuron(nn.Module):
         self.w_lat_baseline = self.w_lat.detach().clone()
         self.W_pv_baseline = self.W_pv.detach().clone()
 
+        # Feedback specificity (decoding image identity with 60% accuracy)
+        self.fb_specificity = torch.tensor([[0.3, 0.2],
+                                            [0.2, 0.3]])
 
     def forward(self, x: torch.Tensor, c: torch.Tensor
                 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -96,10 +110,10 @@ class CCNeuron(nn.Module):
         """
         assert x.shape == (self.n_features,) and c.shape == (self.n_context,)
 
-        p = self.pv(self.activation(self.W_pv @ x)) # feedforward excitation to PV neurons
+        p = self.pv(self.activation(self.W_pv @ x + (self.pyramidal.ema * self.w_lat))) # feedforward excitation to PV neurons
         y = self.pyramidal(self.activation(
             torch.dot(self.w_ff, x) # feedforward excitation
-            + torch.dot(self.w_fb, c) # feedback excitation
+            + torch.dot(self.w_fb, c * self.receives_context) # feedback excitation
             - torch.dot(self.w_lat, p) # "lateral" inhibition 
                             )) 
         
@@ -113,11 +127,22 @@ class CCNeuron(nn.Module):
         Returns y_{t+1}, p_t as computed for this step.
         """
         # 1) Anti-Hebbian update for w_ff
-        dw_ff = - self.lr_ff * (y_next * x_t)
+        match self.FFrule:
+            case "anti-Hebbian":
+                dw_ff = - self.lr_ff * (y_next * x_t)
+            case "Hebbian":
+                dw_ff = self.lr_ff * (y_next * x_t)
 
         # 2) Dampened-Hebbian update for w_fb
         damp = self.alpha / (y_next + self.alpha)
-        dw_fb = self.lr_fb * (damp * y_next * c_t)
+
+        match self.FBrule:
+            # contextual strengthening general (not only the experienced context, also novel)
+            case "dampened-anti-Hebbian":
+                # dw_fb = self.lr_fb * (damp * y_next * c_t)
+                dw_fb = self.lr_fb * (damp * self.fb_specificity @ c_t) * self.receives_context
+            case "Hebbian":
+                dw_fb = self.lr_fb * (y_next * self.fb_specificity @ c_t) * self.receives_context
 
         # 3) Hebbian update for w_lat
         dw_lat = self.lr_lat * (y_next * pv_t)
@@ -140,7 +165,7 @@ class CCNeuron(nn.Module):
         
         # Ensure non-negativity of weights
         self.w_ff = nonnegative(self.w_ff)
-        self.w_fb = nonnegative(self.w_fb)
+        self.w_fb = nonnegative(self.w_fb) * self.receives_context
         self.w_lat = nonnegative(self.w_lat)
         self.W_pv = nonnegative(self.W_pv)
 

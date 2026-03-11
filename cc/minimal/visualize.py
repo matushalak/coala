@@ -41,8 +41,8 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         weight_rows = training_rows.copy()
 
     builder = FigureBuilder.from_matrix(
-        [["A", "B", "B", "D"],
-         ["A", "C", "C", "E"]],
+        [["B", "B", "D"],
+         ["C", "C", "E"]],
         figsize=(20, 15),
         constrained_layout=False,
         grid_wspace=0.25,
@@ -50,7 +50,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         subfigure_wspace=0.15,
         subfigure_hspace=0.2,
     )
-    builder.update_panel("A", subgrid=(3, 2), title=None, label=None)
+    # builder.update_panel("A", subgrid=(3, 2), title=None, label=None)
     builder.update_panel("B", subgrid=(len(phases), len(conditions)), title="Y activity", label="B")
     builder.update_panel("C", subgrid=(len(phases), len(conditions)), title="PV activity", label="C")
     builder.update_panel("D", subgrid=(2, 1), title="Y and PV activity over training", label="D")
@@ -227,7 +227,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         for idx in range(min(2, X1.shape[1])):
             ax_grid[0, 0].plot(step_familiar, X1[:, idx], color=x_colors[idx], lw=1.5, label=f"x_{idx}")
         for idx in range(min(2, C1.shape[1])):
-            ax_grid[0, 0].plot(step_familiar, C1[:, idx], color=c_colors[idx], lw=1.5, label=f"c_{idx}")
+            ax_grid[0, 0].plot(step_familiar, C1[:, idx], color=c_colors[idx], linestyle='--', lw=1.5, label=f"c_{idx}")
         ax_grid[0, 0].set_title("Training (familiar) input/context (X1, C1)")
         ax_grid[0, 0].set_xlabel("")
         ax_grid[0, 0].tick_params(labelbottom=False)
@@ -321,7 +321,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
                 ax_grid[i, 0].set_xlabel("")
                 ax_grid[i, 0].tick_params(labelbottom=False)
 
-    builder.set_plotter("A", plot_panel_a)
+    # builder.set_plotter("A", plot_panel_a)
     builder.set_plotter("B", plot_y)
     builder.set_plotter("C", plot_pv)
     builder.set_plotter("D", plot_training_activity)

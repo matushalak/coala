@@ -63,12 +63,12 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
     model = CCNeuron(**model_config)
 
     # Image 1 ("familiar", trained on)
-    X1, C1 = design_experimental_phase(input_mean=[3,0], input_var = [0.015, 0.0],
-                                       context_mean=[3,1], context_var=[0.015, 0.3],
+    X1, C1 = design_experimental_phase(input_mean=[1,0], input_var = [0.0, 0.0],
+                                       context_mean=[1,0], context_var=[0.0, 0.0],
                                        n_steps = n_steps_per_phase)
     # Image 2 ("novel", not trained on)
-    X2, C2 = design_experimental_phase(input_mean=[0,3], input_var=[0.0, 0.015],
-                                       context_mean=[1,3], context_var=[0.3, 0.015],
+    X2, C2 = design_experimental_phase(input_mean=[0,1], input_var=[0.0, 0.0],
+                                       context_mean=[0,1], context_var=[0.0, 0.0],
                                        n_steps = n_steps_per_phase)
     O = torch.zeros_like(X1) # occlusion (no input)
     
