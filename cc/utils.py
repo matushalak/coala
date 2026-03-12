@@ -69,6 +69,9 @@ def randn_reparam(size:tuple[int, ...], mu:float|Iterable, sigma:float|Iterable)
     mu = torch.as_tensor(mu)
     sigma = torch.as_tensor(sigma)
     
+    if len(size) == 0:
+        size = (1,)
+
     mu_shape = mu.shape if len(mu.shape) > 0 else (1,)
     sigma_shape = sigma.shape if len(sigma.shape) > 0 else (1,)
 

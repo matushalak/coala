@@ -9,7 +9,8 @@ from cc.utils import randn_reparam
 
 def design_experimental_phase(input_mean:torch.Tensor, input_var:torch.Tensor,
                               context_mean:torch.Tensor, context_var:torch.Tensor,
-                              n_steps:int = 100, n_trials:int | None = 10
+                              n_steps:int = 100, n_trials:int | None = 10,
+                              intertrial_sigma:float = 0.05
                               ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Example experiment stimulation for using the minimal CCNeuron model.
@@ -19,9 +20,11 @@ def design_experimental_phase(input_mean:torch.Tensor, input_var:torch.Tensor,
     # Generate random input and context sequences according to provided distributions
     X = randn_reparam(size = (n_steps-nzeros,), mu = input_mean, sigma = input_var)
     C = randn_reparam(size = (n_steps-nzeros,), mu = context_mean, sigma = context_var)
+    intertrial = randn_reparam(size=(nzeros, *X.shape[1:]), mu=0.0, sigma=intertrial_sigma)
+    
     # append a few 0's to indicate initial state
-    X = torch.cat((X.new_zeros((nzeros, *X.shape[1:])), X), dim=0)
-    C = torch.cat((C.new_zeros((nzeros, *C.shape[1:])), C), dim=0)
+    X = torch.cat((intertrial, X), dim=0)
+    C = torch.cat((intertrial, C), dim=0)
     
     if n_trials is not None:
         X = X.repeat((n_trials, 1))
@@ -46,12 +49,9 @@ def run_experimental_phase(model:CCNeuron, X:torch.Tensor, C:torch.Tensor,
         x, y, p, c = model(X[step], C[step])
         if update:
             model.update(x, y, p, c)
-            # print('\n\nStep:', step, '\nw_ff:', model.w_ff.tolist(), '\nw_fb:', model.w_fb.tolist(), '\nw_lat:', model.w_lat.tolist(), '\nW_pv:', model.W_pv.tolist())
         
         # Collect the raw tensors
         data_collection = collect_outputs(step, x, y, p, c, model, data_collection)
-        # if update: 
-        #     for item in data_collection[-4:]: print(item[-1]) 
     
     # Make data frame from collected data
     DF:DataFrame = build_res(data_collection, model)
@@ -63,12 +63,12 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
     model = CCNeuron(**model_config)
 
     # Image 1 ("familiar", trained on)
-    X1, C1 = design_experimental_phase(input_mean=[1,0], input_var = [0.0, 0.0],
-                                       context_mean=[1,0], context_var=[0.0, 0.0],
+    X1, C1 = design_experimental_phase(input_mean=[1,0], input_var = 0.05,
+                                       context_mean=[1,0], context_var=0.05,
                                        n_steps = n_steps_per_phase)
     # Image 2 ("novel", not trained on)
-    X2, C2 = design_experimental_phase(input_mean=[0,1], input_var=[0.0, 0.0],
-                                       context_mean=[0,1], context_var=[0.0, 0.0],
+    X2, C2 = design_experimental_phase(input_mean=[0,1], input_var=0.05,
+                                       context_mean=[0,1], context_var=0.05,
                                        n_steps = n_steps_per_phase)
     O = torch.zeros_like(X1) # occlusion (no input)
     
@@ -79,6 +79,7 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
     DF2 = run_experimental_phase(model, X2, C2, condition_name='full_novel_naive', update=False)
     DFO1 = run_experimental_phase(model, O, C1, condition_name='occlusion_familiar_naive', update=False)
     DFO2 = run_experimental_phase(model, O, C2, condition_name='occlusion_novel_naive', update=False)
+    DFNn = run_experimental_phase(model, X2, O, condition_name='full_novel_nocontext_naive', update=False)
 
     # Now run the same sequences again with updates, to see how the model learns
     DF_training_familiar = run_experimental_phase(model, X1, C1, condition_name='full_familiar_training', update=True)
@@ -88,9 +89,26 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
     DF_novel = run_experimental_phase(model, X2, C2, condition_name='full_novel_expert', update=False)
     DFO_familiar = run_experimental_phase(model, O, C1, condition_name='occlusion_familiar_expert', update=False)
     DFO_novel = run_experimental_phase(model, O, C2, condition_name='occlusion_novel_expert', update=False)
+    DFNe = run_experimental_phase(model, X2, O, condition_name='full_novel_nocontext_expert', update=False)
 
-    df = pd_concat([DF1, DF2, DFO1, DFO2, DF_training_familiar, DF_familiar, DF_novel, DFO_familiar, DFO_novel], ignore_index=True)
+    df = pd_concat(
+        [
+            DF1,
+            DF2,
+            DFO1,
+            DFO2,
+            DFNn,
+            DF_training_familiar,
+            DF_familiar,
+            DF_novel,
+            DFO_familiar,
+            DFO_novel,
+            DFNe,
+        ],
+        ignore_index=True,
+    )
     df['seed'] = model_config['seed']
+
     return df, STIMULI
 
 

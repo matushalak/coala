@@ -277,6 +277,8 @@ def create_temporal_prediction_figure(
     fig.tight_layout()
     return fig
 
+# TODO: clamp V1 output; change task to reconstruction
+
 if __name__ == "__main__":
     coalanet = load_pretrained_weights()
     # ablation results

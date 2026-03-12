@@ -110,11 +110,16 @@ class CCNeuron(nn.Module):
         """
         assert x.shape == (self.n_features,) and c.shape == (self.n_context,)
 
-        p = self.pv(self.activation(self.W_pv @ x + (self.pyramidal.ema * self.w_lat))) # feedforward excitation to PV neurons
+        # feedforward excitation to PV neurons
+        p = self.pv(self.activation(self.W_pv @ x + (self.pyramidal.ema * self.w_lat)) 
+                    + randn_reparam(size=self.pv.ema.shape, mu=0, sigma=0.06) # small random baseline input
+                    ) 
+        
         y = self.pyramidal(self.activation(
             torch.dot(self.w_ff, x) # feedforward excitation
             + torch.dot(self.w_fb, c * self.receives_context) # feedback excitation
             - torch.dot(self.w_lat, p) # "lateral" inhibition 
+            + randn_reparam(size=(), mu=0, sigma=0.01) # small random baseline input
                             )) 
         
         return x, y, p, c

@@ -137,16 +137,16 @@ FB_FB.update({
     })
 
 minimal_configs = {
-    # "un_un": nonresponder,
-    # "un_FF": un_FF, # Hebbian FF and FB plasticity
-    # "un_FB": un_FB,
+    "un_un": nonresponder,
+    "un_FF": un_FF, # Hebbian FF and FB plasticity
+    "un_FB": un_FB,
     
-    # "FF_un": FF_un,
-    # "FF_FF": FF_FF, # Hebbian FF plasticity
+    "FF_un": FF_un,
+    "FF_FF": FF_FF, # Hebbian FF plasticity
     
-    # "FF_FB_broad":broad,
-    # "FF_FB_narrow_familiar": narrow_familiar,
-    # "FF_FB_narrow_novel": narrow_novel,
+    "FF_FB_broad":broad,
+    "FF_FB_narrow_familiar": narrow_familiar,
+    "FF_FB_narrow_novel": narrow_novel,
     
     "FB_FB": FB_FB
 }

@@ -58,7 +58,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
 
     x_colors = {0: "green", 1: "gold"}
     c_colors = {0: "magenta", 1: "navy"}
-    image_colors = {"full": "black", "occlusion": "red"}
+    image_colors = {"full": "black", "occlusion": "red", "novel_no_context": "cyan"}
     pv_colors = {0: "red", 1: "pink"}
 
     def _to_np(ts: torch.Tensor | np.ndarray) -> np.ndarray:
@@ -105,6 +105,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
             for j, condition in enumerate(conditions):
                 ax = ax_grid[i, j]
                 cell = y_df[(y_df["experiment_phase"] == phase) & (y_df["condition"] == condition)]
+                cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
                 if cell.empty:
                     ax.set_visible(False)
                     continue
@@ -113,13 +114,16 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
                     x="step",
                     y="y",
                     hue="image_type",
-                    hue_order=[k for k in ["full", "occlusion"] if k in image_types],
+                    hue_order=[k for k in ["full", "occlusion", "novel_no_context"] if k in image_types],
+                    style="image_type",
                     palette=image_colors,
                     errorbar=None,
                     ax=ax,
                     legend=(i == 0 and j == 0),
                 )
                 ax.set_title(f"{phase} | {condition}")
+                if 'un_un' in name:
+                    ax.set_ylim(0, 0.3)
                 if i < len(phases) - 1:
                     ax.set_xlabel("")
                     ax.tick_params(labelbottom=False)
@@ -137,6 +141,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
             for j, condition in enumerate(conditions):
                 ax = ax_grid[i, j]
                 cell = pv_df[(pv_df["experiment_phase"] == phase) & (pv_df["condition"] == condition)]
+                cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
                 if cell.empty:
                     ax.set_visible(False)
                     continue
@@ -145,7 +150,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
                     x="step",
                     y="pv_value",
                     hue="image_type",
-                    hue_order=[k for k in ["full", "occlusion"] if k in image_types],
+                    hue_order=[k for k in ["novel_no_context","full", "occlusion"] if k in image_types],
                     palette=image_colors,
                     style="pv_index",
                     errorbar=None,
@@ -413,11 +418,20 @@ def wide_to_long(DF:DataFrame) -> DataFrame:
     if "condition" in DF.columns:
         cond = DF["condition"].astype(str).to_numpy()
         cond_rep = np.repeat(cond, rep)
-        parts = pd.Series(cond_rep).str.split("_", n=2, expand=True)
-        if parts.shape[1] == 3:
-            long_df["image_type"] = parts[0].to_numpy()
-            long_df["condition"] = parts[1].to_numpy()
-            long_df["experiment_phase"] = parts[2].to_numpy()
+        parts = pd.Series(cond_rep).str.rsplit("_", n=1, expand=True)
+        if parts.shape[1] == 2:
+            prefix = parts[0]
+            long_df["experiment_phase"] = parts[1].to_numpy()
+            long_df["condition"] = np.where(
+                prefix.str.contains("_novel_", regex=False),
+                "novel",
+                prefix.str.split("_", n=1).str[1],
+            )
+            long_df["image_type"] = np.where(
+                prefix.eq("full_novel_nocontext"),
+                "novel_no_context",
+                prefix.str.split("_", n=1).str[0],
+            )
         else:
             long_df["condition"] = cond_rep
 
