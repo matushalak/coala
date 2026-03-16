@@ -13,10 +13,16 @@ from cc.ml import COALA_logs
 from cc.ml.architecture import (
     COALANet,
     create_temporal_prediction_figure,
+    create_temporal_reconstruction_figure,
+    create_temporal_reconstruction_grid,
+    compute_temporal_reconstruction_loss,
     load_pretrained_weights,
-    stack_temporal_logits,
+    stack_temporal_outputs,
 )
 from cc.ml.heads.classifier import TemporalCEloss
+
+# TODO: redo the whole thing, won't do BPTT for fine-tuning hyperparams (too slow)
+# Instead simply use pl module for inference with updates and nice logging to tensorboard
 
 
 def _build_temporal_image_grid(
@@ -41,20 +47,22 @@ class COALA(pl.LightningModule):
     def __init__(
         self,
         model: COALANet,
-        loss_fn: Callable = TemporalCEloss(),
+        loss_fn: Callable | None = None,
         lr: float = 1e-3,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["model", "loss_fn"])
         self.model = model
-        self.loss_fn = loss_fn
+        self.loss_fn = loss_fn if loss_fn is not None else (
+            TemporalCEloss() if self.model.mode == "discriminative" else None
+        )
         self.automatic_optimization = False
         self.model.set_adaptation_trainable(False)
         self.model.dynamic_updates = True
 
     @torch.no_grad()
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        return stack_temporal_logits(self.model(images))
+        return stack_temporal_outputs(self.model(images))
 
     def configure_optimizers(self):
         return None
@@ -69,7 +77,7 @@ class COALA(pl.LightningModule):
                 return labels.expand(-1, timesteps)
         raise ValueError(f"Unsupported target shape {tuple(labels.shape)} for {timesteps} timesteps.")
 
-    def _predict_logits(self, images: torch.Tensor, dynamic_updates: bool) -> torch.Tensor:
+    def _predict_outputs(self, images: torch.Tensor, dynamic_updates: bool) -> torch.Tensor:
         previous_dynamic_updates = self.model.dynamic_updates
         self.model.dynamic_updates = dynamic_updates
         self.model.reset_dynamic_state(ref_tensor=images)
@@ -82,42 +90,62 @@ class COALA(pl.LightningModule):
 
     def _compute_metrics(
         self,
-        logits: torch.Tensor,
-        labels: torch.Tensor,
+        outputs: torch.Tensor,
+        targets: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        targets = self._labels_to_targets(labels, timesteps=logits.shape[1])
-        loss = self.loss_fn(logits, targets)
-        probs = torch.softmax(logits, dim=-1)
-        preds = logits.argmax(dim=-1)
+        if self.model.mode == "discriminative":
+            temporal_targets = self._labels_to_targets(targets, timesteps=outputs.shape[1])
+            assert self.loss_fn is not None, "Discriminative mode requires a loss_fn."
+            loss = self.loss_fn(outputs, temporal_targets)
+            probs = torch.softmax(outputs, dim=-1)
+            preds = outputs.argmax(dim=-1)
+            metrics = {
+                "final_accuracy": (preds[:, -1] == temporal_targets[:, -1]).float().mean(),
+                "temporal_accuracy": (preds == temporal_targets).float().mean(),
+                "final_true_prob": probs[:, -1].gather(1, temporal_targets[:, -1].unsqueeze(1)).mean(),
+            }
+            return loss, metrics
+
+        temporal_loss = compute_temporal_reconstruction_loss(outputs, targets)
+        loss = temporal_loss.mean()
         metrics = {
-            "final_accuracy": (preds[:, -1] == targets[:, -1]).float().mean(),
-            "temporal_accuracy": (preds == targets).float().mean(),
-            "final_true_prob": probs[:, -1].gather(1, targets[:, -1].unsqueeze(1)).mean(),
+            "final_reconstruction_loss": temporal_loss[:, -1].mean(),
         }
         return loss, metrics
 
     def _log_metrics(self, prefix: str, loss: torch.Tensor, metrics: dict[str, torch.Tensor], prog_bar: bool):
-        self.log(f"{prefix}_classification_loss", loss, on_step=False, on_epoch=True, prog_bar=prog_bar)
-        self.log(f"{prefix}_final_accuracy", metrics["final_accuracy"], on_step=False, on_epoch=True, prog_bar=prog_bar)
-        self.log(f"{prefix}_temporal_accuracy", metrics["temporal_accuracy"], on_step=False, on_epoch=True)
-        self.log(f"{prefix}_final_true_prob", metrics["final_true_prob"], on_step=False, on_epoch=True)
+        if self.model.mode == "discriminative":
+            self.log(f"{prefix}_classification_loss", loss, on_step=False, on_epoch=True, prog_bar=prog_bar)
+            self.log(f"{prefix}_final_accuracy", metrics["final_accuracy"], on_step=False, on_epoch=True, prog_bar=prog_bar)
+            self.log(f"{prefix}_temporal_accuracy", metrics["temporal_accuracy"], on_step=False, on_epoch=True)
+            self.log(f"{prefix}_final_true_prob", metrics["final_true_prob"], on_step=False, on_epoch=True)
+            return
+
+        self.log(f"{prefix}_reconstruction_loss", loss, on_step=False, on_epoch=True, prog_bar=prog_bar)
+        self.log(
+            f"{prefix}_final_reconstruction_loss",
+            metrics["final_reconstruction_loss"],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=prog_bar,
+        )
 
     def _shared_eval_step(self, batch, stage: str):
-        images, labels = batch
+        images, targets = batch
 
-        static_logits = self._predict_logits(images, dynamic_updates=False)
-        static_loss, static_metrics = self._compute_metrics(static_logits, labels)
+        static_outputs = self._predict_outputs(images, dynamic_updates=False)
+        static_loss, static_metrics = self._compute_metrics(static_outputs, targets)
         self._log_metrics(f"{stage}_static", static_loss, static_metrics, prog_bar=False)
 
-        dynamic_logits = self._predict_logits(images, dynamic_updates=True)
-        dynamic_loss, dynamic_metrics = self._compute_metrics(dynamic_logits, labels)
+        dynamic_outputs = self._predict_outputs(images, dynamic_updates=True)
+        dynamic_loss, dynamic_metrics = self._compute_metrics(dynamic_outputs, targets)
         self._log_metrics(f"{stage}_dynamic", dynamic_loss, dynamic_metrics, prog_bar=(stage == "val"))
         return dynamic_loss
 
     def training_step(self, batch, batch_idx):
-        images, labels = batch
-        logits = self._predict_logits(images, dynamic_updates=True)
-        loss, metrics = self._compute_metrics(logits, labels)
+        images, targets = batch
+        outputs = self._predict_outputs(images, dynamic_updates=True)
+        loss, metrics = self._compute_metrics(outputs, targets)
         self._log_metrics("train", loss, metrics, prog_bar=True)
         return loss
 
@@ -158,10 +186,10 @@ class COALADiagnosticsCallback(pl.Callback):
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         if batch_idx == 0:
-            images, labels = batch
+            images, targets = batch
             self._example_batch = (
                 images[:self.num_examples].detach().cpu(),
-                labels[:self.num_examples].detach().cpu(),
+                targets[:self.num_examples].detach().cpu(),
             )
 
     @torch.no_grad()
@@ -173,9 +201,9 @@ class COALADiagnosticsCallback(pl.Callback):
         if trainer.current_epoch % self.every_n_epochs != 0:
             return
 
-        images_cpu, labels_cpu = self._example_batch
+        images_cpu, targets_cpu = self._example_batch
         images = images_cpu.to(pl_module.device)
-        labels = labels_cpu.to(pl_module.device)
+        targets = targets_cpu.to(pl_module.device)
 
         epoch = trainer.current_epoch
         is_sanity = trainer.sanity_checking
@@ -188,13 +216,53 @@ class COALADiagnosticsCallback(pl.Callback):
         )
         trainer.logger.experiment.add_image("COALA/masked_sequence", grid, global_step=log_step)
 
-        dynamic_logits = pl_module._predict_logits(images, dynamic_updates=True)
-        dynamic_fig = create_temporal_prediction_figure(dynamic_logits, labels, max_examples=self.num_examples)
-        trainer.logger.experiment.add_figure("COALA/dynamic_prediction_curves", dynamic_fig, global_step=log_step)
+        dynamic_outputs = pl_module._predict_outputs(images, dynamic_updates=True)
+        static_outputs = pl_module._predict_outputs(images, dynamic_updates=False)
 
-        static_logits = pl_module._predict_logits(images, dynamic_updates=False)
-        static_fig = create_temporal_prediction_figure(static_logits, labels, max_examples=self.num_examples)
-        trainer.logger.experiment.add_figure("COALA/static_prediction_curves", static_fig, global_step=log_step)
+        if pl_module.model.mode == "discriminative":
+            dynamic_fig = create_temporal_prediction_figure(dynamic_outputs, targets, max_examples=self.num_examples)
+            trainer.logger.experiment.add_figure("COALA/dynamic_prediction_curves", dynamic_fig, global_step=log_step)
+
+            static_fig = create_temporal_prediction_figure(static_outputs, targets, max_examples=self.num_examples)
+            trainer.logger.experiment.add_figure("COALA/static_prediction_curves", static_fig, global_step=log_step)
+        else:
+            dynamic_fig = create_temporal_reconstruction_figure(
+                dynamic_outputs,
+                targets,
+                max_examples=self.num_examples,
+            )
+            trainer.logger.experiment.add_figure("COALA/dynamic_reconstruction_curves", dynamic_fig, global_step=log_step)
+
+            static_fig = create_temporal_reconstruction_figure(
+                static_outputs,
+                targets,
+                max_examples=self.num_examples,
+            )
+            trainer.logger.experiment.add_figure("COALA/static_reconstruction_curves", static_fig, global_step=log_step)
+
+            dynamic_grid = create_temporal_reconstruction_grid(
+                images_cpu,
+                dynamic_outputs,
+                num_examples=self.num_examples,
+                max_time_steps=self.max_time_steps,
+            )
+            trainer.logger.experiment.add_image(
+                "COALA/dynamic_masked_vs_reconstruction",
+                dynamic_grid,
+                global_step=log_step,
+            )
+
+            static_grid = create_temporal_reconstruction_grid(
+                images_cpu,
+                static_outputs,
+                num_examples=self.num_examples,
+                max_time_steps=self.max_time_steps,
+            )
+            trainer.logger.experiment.add_image(
+                "COALA/static_masked_vs_reconstruction",
+                static_grid,
+                global_step=log_step,
+            )
 
         for layer_idx, layer in enumerate(pl_module.model.iter_cc_modules()):
             trainer.logger.experiment.add_scalar(
@@ -222,8 +290,14 @@ class COALADiagnosticsCallback(pl.Callback):
         if self.save_to_disk:
             image_name = f"epoch_{epoch}_masked_sequence.png" if not is_sanity else "pre_epoch_0_masked_sequence.png"
             save_image(grid, os.path.join(trainer.logger.log_dir, image_name))
-            dynamic_fig.savefig(os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_dynamic_prediction_curves.png"))
-            static_fig.savefig(os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_static_prediction_curves.png"))
+            if pl_module.model.mode == "discriminative":
+                dynamic_fig.savefig(os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_dynamic_prediction_curves.png"))
+                static_fig.savefig(os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_static_prediction_curves.png"))
+            else:
+                save_image(dynamic_grid, os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_dynamic_masked_vs_reconstruction.png"))
+                save_image(static_grid, os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_static_masked_vs_reconstruction.png"))
+                dynamic_fig.savefig(os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_dynamic_reconstruction_curves.png"))
+                static_fig.savefig(os.path.join(trainer.logger.log_dir, f"epoch_{epoch}_static_reconstruction_curves.png"))
 
         plt.close(dynamic_fig)
         plt.close(static_fig)
@@ -248,6 +322,7 @@ def train_coala(args):
         number_of_masks=args.number_of_masks,
         timesteps_per_mask=args.timesteps_per_mask,
         accepted_digits=args.accepted_digits,
+        target_type="image" if args.task_mode == "generative" else "label",
     )
 
     diagnostics_callback = COALADiagnosticsCallback(
@@ -259,7 +334,11 @@ def train_coala(args):
     save_callback = ModelCheckpoint(
         save_weights_only=True,
         mode="min",
-        monitor="val_dynamic_classification_loss",
+        monitor=(
+            "val_dynamic_classification_loss"
+            if args.task_mode == "discriminative"
+            else "val_dynamic_reconstruction_loss"
+        ),
     )
     trainer = pl.Trainer(
         default_root_dir=args.log_dir,
@@ -277,7 +356,7 @@ def train_coala(args):
         )
 
     pl.seed_everything(args.seed)
-    model = COALA(model=load_pretrained_weights(), lr=args.lr)
+    model = COALA(model=load_pretrained_weights(mode=args.task_mode), lr=args.lr)
     trainer.fit(model, train_loader, val_loader)
 
     best_model_path = trainer.checkpoint_callback.best_model_path
@@ -300,6 +379,13 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", default=1, type=int, help="Minibatch size.")
     parser.add_argument("--epochs", default=21, type=int, help="Max number of epochs.")
     parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
+    parser.add_argument(
+        "--task_mode",
+        default="discriminative",
+        choices=("discriminative", "generative"),
+        type=str,
+        help="Whether COALA reads out class predictions from V4 or reconstructions from V1 feedback.",
+    )
     parser.add_argument("--num_workers",default=0,type=int,
         help="Number of workers to use in data loaders. For strict determinism set this to 0.",
     )

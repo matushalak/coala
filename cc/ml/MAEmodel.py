@@ -10,7 +10,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from cc.datasets.mnist import mnist
 from cc.ml.sparse_cnn_unet import SparseCNNUNet
 
-# TODO: experiment with variable masking ratio per batch
 class MAE(pl.LightningModule):
     """
     Bare-bones CNN masked autoencoder for normalized images.
@@ -75,6 +74,10 @@ class MAE(pl.LightningModule):
         per_pixel_mse = (recon - imgs).pow(2).mean(dim=1)
         masked_pixels = (~keep_mask.squeeze(1)).to(dtype=per_pixel_mse.dtype)
         weights = torch.ones_like(per_pixel_mse) + masked_pixels * (self.hparams.masked_loss_weight - 1.0)
+        # unlike SparK and mainstream ViT MAEs implementations, 
+        # we still include unmasked pixels in the loss (instead of ignoring them completely)
+        # because we want to achieve good reconstructions across the whole image 
+        # (at test time we don't know what is a mask)
         weighted = per_pixel_mse * weights
         per_image = weighted.sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1e-8)
         return per_image.mean()

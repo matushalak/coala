@@ -30,6 +30,7 @@ class MaskedSequentialDataset(data.Dataset):
         timesteps_per_mask: int = 1,
         mask_pattern: str = "random",
         masked_fill: str | float = 0.0,
+        target_type: str = "label",
     ):
         super().__init__()
         if patch_size <= 0:
@@ -53,6 +54,8 @@ class MaskedSequentialDataset(data.Dataset):
             except (TypeError, ValueError):
                 raise ValueError("masked_fill must be 'random' or a float.") from None
             self.masked_fill_mode = "constant"
+        if target_type not in ("label", "image"):
+            raise ValueError("target_type must be one of: 'label', 'image'.")
 
         self.dataset = dataset
         self.patch_size = patch_size
@@ -61,6 +64,7 @@ class MaskedSequentialDataset(data.Dataset):
         self.timesteps_per_mask = timesteps_per_mask
         self.num_timeframes = number_of_masks * timesteps_per_mask
         self.mask_pattern = mask_pattern
+        self.target_type = target_type
 
         sample_img, _ = self.dataset[0]
         if sample_img.dim() != 3:
@@ -122,7 +126,7 @@ class MaskedSequentialDataset(data.Dataset):
             keep = keep.repeat_interleave(self.timesteps_per_mask, dim=0)
         return keep
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int | torch.Tensor]:
         img, label = self.dataset[idx]
         keep = self._sample_keep_mask()
         keep = keep.view(self.num_timeframes, self.patches_h, self.patches_w)
@@ -138,4 +142,5 @@ class MaskedSequentialDataset(data.Dataset):
         else:
             img_t = img_t.expand(self.num_timeframes, -1, -1, -1)
             masked_imgs = torch.where(keep, img_t, self.masked_fill_value)
-        return masked_imgs, label
+        target = label if self.target_type == "label" else img
+        return masked_imgs, target

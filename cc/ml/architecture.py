@@ -1,11 +1,12 @@
+import argparse
 import torch
 import torch.nn as nn
+from typing import Literal
 
 from cc.ml.sparse_cnn_unet import SparseCNNEncoder, SparseCNNDecoder, SparseCNNUNet, SparseLocalStage, DenseLocalStage, DenseUpConv2d, SparseConv2d
 from cc.ml import MAE_logs, Classifier_logs
 from cc.ml.utils import load_checkpoint
 from cc.ml.heads.classifier import ClassifierHead
-from cc.ml.heads.task_head import TaskHead
 from cc.ml.cc_modules import CCModule
 from cc.datasets.msmnist import msmnist, visualize_msmnist_examples
 
@@ -16,16 +17,31 @@ class COALANet(nn.Module):
         Hierarchical CNN architecture collapses a pretrained CNN autoencoder into a recurrent CNN 
         by reusing (and freezing) the encoder (feedforward) and decoder (feedback) weights.
     '''
-    def __init__(self, encoder:SparseCNNEncoder, decoder:SparseCNNDecoder, head:TaskHead, 
-                 data_dims:tuple[int, int] = (1,28,28), config:dict = {}):
+    MODES = ("discriminative", "generative")
+
+    def __init__(
+        self,
+        encoder: SparseCNNEncoder,
+        decoder: SparseCNNDecoder,
+        head: nn.Module | None = None,
+        data_dims: tuple[int, int] = (1, 28, 28),
+        config: dict | None = None,
+        mode: Literal["discriminative", "generative"] = "discriminative",
+    ):
         super(COALANet, self).__init__()
-        self.data_dims, self.config = data_dims, config
+        self.data_dims = data_dims
+        self.config = {} if config is None else config
+        self.mode = "discriminative"
+        self.head: nn.Module | None = None
+        self.discriminative_head: nn.Module | None = None
+        self.generative_head: nn.Module | None = None
         
         # Load the pre-trained encoder, decoder, and head weights into the COALANet architecture
         self._load_pretrained(encoder, decoder, head)
 
         # Define hierarchical recurrent layers
         self._define_hierarchical_layers()
+        self.set_mode(mode)
 
         self.dynamic_updates = True
         self.training_params = False
@@ -41,10 +57,11 @@ class COALANet(nn.Module):
         # Initialize hidden state (all layers start with zero hidden state)
         Y_old_activations = {f'L{i}': torch.zeros((x.shape[0], *l.dims_), device=x.device, dtype=x.dtype) 
                              for i, l in enumerate(self.cc_layers)}
-        logits_per_timestep = []
+        outputs_per_timestep = []
         for t in range(x.shape[1]): # iterate over time dimension
             Y_new_activations = {f'L{i}': None  for i in range(self.n_layers)}
             yff = x[:, t, ...]
+            readout_source = None
             # Process all recurrent layers at once
             for il, layer in enumerate(self.cc_layers):
                 yfb = Y_old_activations.get(f'L{il+1}', None) 
@@ -52,17 +69,32 @@ class COALANet(nn.Module):
                 Y_new_activations[f'L{il}'] = layer_outputs[0]
                 if self.dynamic_updates:
                     layer.update(*layer_outputs)
+                if self.mode == "generative" and il == 0:
+                    # readout_source = layer_outputs[2] # V2->V1 feedback signal
+                    readout_source = layer_outputs[0] # temporally integrated V1 activity
 
                 # Feed current-step activation to the next (higher) layer.
                 yff = Y_new_activations[f'L{il}']
-            # Pass output to head from current-step top-layer activations.
-            top_state = Y_new_activations[f'L{self.n_layers-1}']
-            assert top_state is not None, "Top layer activations should not be None."
-            out = self.head(top_state)
+            if self.mode == "discriminative":
+                readout_source = Y_new_activations[f'L{self.n_layers-1}']
+                assert readout_source is not None, "Top layer activations should not be None."
+            assert self.head is not None, "COALANet head has not been configured."
+            assert readout_source is not None, "Readout source should not be None."
+            out = self.head(readout_source)
             # Update activations for all layers at once
             Y_old_activations.update(Y_new_activations)
-            logits_per_timestep.append(out)
-        return logits_per_timestep
+            outputs_per_timestep.append(out)
+        return outputs_per_timestep
+
+    def set_mode(self, mode: Literal["discriminative", "generative"]) -> None:
+        if mode not in self.MODES:
+            raise ValueError(f"mode must be one of {self.MODES}, got {mode!r}.")
+        if mode == "discriminative" and self.discriminative_head is None:
+            raise ValueError("Discriminative mode requires a discriminative head.")
+        if mode == "generative" and self.generative_head is None:
+            raise ValueError("Generative mode requires a generative head.")
+        self.mode = mode
+        self.head = self.discriminative_head if mode == "discriminative" else self.generative_head
 
     def _define_hierarchical_layers(self)->None:
         self.n_layers = len(self.ff_local_processing) # number of hierarchical layers based on the feedforward local processing stages
@@ -93,12 +125,12 @@ class COALANet(nn.Module):
             FB_upconv = self.fb_upsample_convs.get(f"up{next_dim}_to_{dst}", None)
             FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local, local_processing0=FB_local0
                                 ) if FB_upconv is not None else None
-            print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
+            # print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
             layer = CCModule(spatial_dim, FF_conv, FB_conv)
             self.cc_layers.append(layer)
             src = dst
         
-    def _load_pretrained(self, encoder:SparseCNNEncoder, decoder:SparseCNNDecoder, head:TaskHead,
+    def _load_pretrained(self, encoder:SparseCNNEncoder, decoder:SparseCNNDecoder, head:nn.Module | None,
                          freeze_encoder:bool = True, freeze_decoder:bool = True, freeze_head:bool = True)->None:
         # Extract feedforward (encoder) weights
         encoder = encoder
@@ -133,12 +165,15 @@ class COALANet(nn.Module):
         self.ff_names = list(self.ff_local_processing.keys())
         self.fb_names = list(self.fb_local_processing.keys())
 
-        # Task-specific head (eg. classification), starting from the latent dimension
-        self.head = head
-        if freeze_head:
-            for param in self.head.parameters():
+        # Task-specific top readout (V4) for discriminative mode.
+        self.discriminative_head = head
+        if self.discriminative_head is not None and freeze_head:
+            for param in self.discriminative_head.parameters():
                 param.requires_grad = False
-            self.head.eval()
+            self.discriminative_head.eval()
+
+        # Generative readout clamps the V1 feedback state through the pretrained decoder output conv.
+        self.generative_head = decoder.up28_to_out
 
     def iter_cc_modules(self):
         return iter(self.cc_layers)
@@ -200,7 +235,9 @@ class FB_Conv2d(nn.Module):
         return x
 
 # --- COALANet utils ---
-def load_pretrained_weights()->COALANet:
+def load_pretrained_weights(
+    mode: Literal["discriminative", "generative"] = "discriminative",
+)->COALANet:
     # Define pre-trained autoencoder model
     mae_model = SparseCNNUNet(num_input_channels=1, num_output_channels=1, num_filters=32,
                               upconv_method="upsample+conv")
@@ -210,32 +247,60 @@ def load_pretrained_weights()->COALANet:
     encoder:SparseCNNEncoder = mae_model.encoder
     decoder:SparseCNNDecoder = mae_model.decoder
     
-    # Load pre-trained classifier with head
-    mnist_classifier = ClassifierHead.from_pretrained_unet(
-        checkpoint_path=mae_checkpoint_path,
-        num_classes=10, # MNIST has 10 classes
-        latent_dim=32*4, # latent dimension from the MAE model 
-        lr=1e-3,
-        freeze_encoder=True,
-        upconv_method = 'upsample+conv')
-    # Load pre-trained classifier weights
-    classifier_checkpoint_path = f"{Classifier_logs}/version_23/checkpoints/epoch=9-step=4220.ckpt"
-    load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False)
-    # Extract the classifier head
-    mnist_classifier_head = mnist_classifier.head
+    mnist_classifier_head = None
+    if mode == "discriminative":
+        # Load pre-trained classifier with head
+        mnist_classifier = ClassifierHead.from_pretrained_unet(
+            checkpoint_path=mae_checkpoint_path,
+            num_classes=10, # MNIST has 10 classes
+            latent_dim=32*4, # latent dimension from the MAE model 
+            lr=1e-3,
+            freeze_encoder=True,
+            upconv_method = 'upsample+conv')
+        # Load pre-trained classifier weights
+        classifier_checkpoint_path = f"{Classifier_logs}/version_23/checkpoints/epoch=9-step=4220.ckpt"
+        load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False)
+        # Extract the classifier head
+        mnist_classifier_head = mnist_classifier.head
 
     # Instantiate COALANet with the loaded encoder, decoder, and head
-    model = COALANet(encoder, decoder, mnist_classifier_head)
+    model = COALANet(encoder, decoder, mnist_classifier_head, mode=mode)
 
     return model
 
 
+def stack_temporal_outputs(
+    outputs: list[torch.Tensor] | torch.Tensor,
+    expected_ndim: int | None = None,
+) -> torch.Tensor:
+    if isinstance(outputs, torch.Tensor):
+        stacked = outputs
+    else:
+        stacked = torch.stack(outputs, dim=1) # introduce "time" dimension 1 (B, T, C, H, W)
+    if expected_ndim is not None and stacked.dim() != expected_ndim:
+        raise ValueError(f"Expected tensor with {expected_ndim} dims, got shape {tuple(stacked.shape)}.")
+    return stacked
+
+
 def stack_temporal_logits(logits:list[torch.Tensor] | torch.Tensor)->torch.Tensor:
-    if isinstance(logits, torch.Tensor):
-        if logits.dim() != 3:
-            raise ValueError(f"Expected logits tensor of shape (B, T, C), got {tuple(logits.shape)}.")
-        return logits
-    return torch.stack(logits, dim=1)
+    return stack_temporal_outputs(logits, expected_ndim=3)
+
+
+def stack_temporal_reconstructions(
+    reconstructions: list[torch.Tensor] | torch.Tensor,
+) -> torch.Tensor:
+    return stack_temporal_outputs(reconstructions, expected_ndim=5)
+
+
+def compute_temporal_reconstruction_loss(
+    reconstructions: list[torch.Tensor] | torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    reconstructions = stack_temporal_reconstructions(reconstructions)
+    if targets.dim() != 4:
+        raise ValueError(f"Expected targets tensor of shape (B, C, H, W), got {tuple(targets.shape)}.")
+    per_pixel_mse = (reconstructions - targets.unsqueeze(1)).pow(2).mean(dim=2)
+    return per_pixel_mse.mean(dim=(-2, -1))
 
 
 def create_temporal_prediction_figure(
@@ -277,21 +342,142 @@ def create_temporal_prediction_figure(
     fig.tight_layout()
     return fig
 
-# TODO: clamp V1 output; change task to reconstruction
+
+def create_temporal_reconstruction_figure(
+    reconstructions: list[torch.Tensor] | torch.Tensor,
+    targets: torch.Tensor,
+    max_examples: int | None = None,
+):
+    import matplotlib.pyplot as plt
+
+    losses = compute_temporal_reconstruction_loss(reconstructions, targets).detach().cpu()
+    if max_examples is not None:
+        losses = losses[:max_examples]
+
+    timesteps = torch.arange(losses.shape[1]).cpu().numpy()
+    tick_step = max(1, losses.shape[1] // 12)
+    fig_width = min(18.0, max(10.0, 0.35 * losses.shape[1]))
+    fig, axes = plt.subplots(losses.shape[0], 1, figsize=(fig_width, 2.2 * losses.shape[0]), sharex=True)
+    if losses.shape[0] == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        series = losses[i].numpy()
+        ax.plot(timesteps, series, marker="o", label="reconstruction MSE")
+        ax.set_xlim(0, losses.shape[1] - 1)
+        ax.set_ylabel(f"sample {i}")
+        ax.grid(alpha=0.25)
+        ax.set_title(f"final_loss={series[-1]:.4f}")
+        ax.legend(loc="upper right")
+
+    axes[-1].set_xlabel("time step")
+    axes[-1].set_xticks(timesteps[::tick_step])
+    fig.tight_layout()
+    return fig
+
+
+def create_temporal_reconstruction_grid(
+    masked_images: torch.Tensor,
+    reconstructions: list[torch.Tensor] | torch.Tensor,
+    num_examples: int = 4,
+    max_time_steps: int = 16,
+) -> torch.Tensor:
+    from torchvision.utils import make_grid
+
+    reconstructions = stack_temporal_reconstructions(reconstructions).detach().cpu()
+    masked_images = masked_images[:num_examples].detach().cpu()
+    reconstructions = reconstructions[:num_examples]
+
+    if masked_images.shape[:2] != reconstructions.shape[:2]:
+        raise ValueError(
+            "masked_images and reconstructions must agree on batch and time dimensions, "
+            f"got {tuple(masked_images.shape[:2])} vs {tuple(reconstructions.shape[:2])}."
+        )
+
+    _, total_t, _, _, _ = masked_images.shape
+    num_time_steps = min(total_t, max_time_steps)
+    time_idx = torch.linspace(0, total_t - 1, steps=num_time_steps).round().long()
+    masked_panel = masked_images[:, time_idx]
+    recon_panel = reconstructions[:, time_idx]
+    panel = torch.stack((masked_panel, recon_panel), dim=1).reshape(-1, *masked_images.shape[2:])
+    return make_grid(panel, nrow=num_time_steps, normalize=False, pad_value=0.5)
+
+def _show_image_grid(grid: torch.Tensor, title: str) -> None:
+    import matplotlib.pyplot as plt
+
+    # Match torchvision.save_image rendering used in MAEmodel epoch_x_recon outputs.
+    grid = grid.detach().cpu().mul(255).add_(0.5).clamp_(0, 255).to(torch.uint8)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    if grid.shape[0] == 1 or (
+        grid.shape[0] == 3
+        and torch.equal(grid[0], grid[1])
+        and torch.equal(grid[1], grid[2])
+    ):
+        ax.imshow(grid[0], cmap="gray", interpolation="nearest", vmin=0, vmax=255)
+    else:
+        ax.imshow(grid.permute(1, 2, 0), interpolation="nearest")
+    ax.set_title(title)
+    ax.axis("off")
+    fig.tight_layout()
+
+
+def _parse_masked_fill_arg(masked_fill: str) -> str | float:
+    if masked_fill == "random":
+        return masked_fill
+    return float(masked_fill)
 
 if __name__ == "__main__":
-    coalanet = load_pretrained_weights()
-    # ablation results
-    # can perform just as well (and mostly better with leaky integration of FF weights)
-    # TODO: need to measure success rate systematically with loss from COALAmodel
-    examples, labels = visualize_msmnist_examples(num_examples=1, 
-                                                  number_of_masks=200, timesteps_per_mask=1,
-                                                  mask_ratio=0.5,
-                                                  masked_fill='random',
-                                                  accepted_digits=None, show=True)
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        "--mode",
+        default="discriminative",
+        choices=("discriminative", "generative"),
+        type=str,
+        help="Which COALANet readout mode to demo.",
+    )
+    parser.add_argument("--num_examples", default=1, type=int, help="Number of examples to visualize.")
+    parser.add_argument("--number_of_masks", default=200, type=int, help="Distinct masks per sample.")
+    parser.add_argument("--timesteps_per_mask", default=1, type=int, help="How long each mask is reused.")
+    parser.add_argument("--mask_ratio", default=0.5, type=float, help="Fraction of masked patches.")
+    parser.add_argument("--patch_size", default=4, type=int, help="Size of each patch.")
+    parser.add_argument("--masked_fill", default="random", type=str, help="Masked pixel fill value or 'random'.")
+    parser.add_argument("--accepted_digits", nargs="*", type=int, default=None, help="Optional subset of digits.")
+    parser.add_argument("--max_time_steps", default=16, type=int, help="Max timesteps shown in reconstruction grids.")
+    parser.add_argument("--hide_input_grid", action="store_true", help="Skip showing the masked input sequence grid.")
+    args = parser.parse_args()
+
+    target_type = "image" if args.mode == "generative" else "label"
+    coalanet = load_pretrained_weights(mode=args.mode)
+    examples, targets = visualize_msmnist_examples(
+        num_examples=args.num_examples,
+        number_of_masks=args.number_of_masks,
+        timesteps_per_mask=args.timesteps_per_mask,
+        mask_ratio=args.mask_ratio,
+        masked_fill=_parse_masked_fill_arg(args.masked_fill),
+        accepted_digits=args.accepted_digits,
+        target_type=target_type,
+        show=not args.hide_input_grid,
+        patch_size=args.patch_size,
+    )
+
     with torch.no_grad():
-        logits = stack_temporal_logits(coalanet(examples))
-    fig = create_temporal_prediction_figure(logits, labels)
+        outputs = coalanet(examples)
+
     import matplotlib.pyplot as plt
+
+    if args.mode == "discriminative":
+        logits = stack_temporal_logits(outputs)
+        fig = create_temporal_prediction_figure(logits, targets)
+    else:
+        reconstructions = stack_temporal_reconstructions(outputs)
+        fig = create_temporal_reconstruction_figure(reconstructions, targets)
+        grid = create_temporal_reconstruction_grid(
+            examples,
+            reconstructions,
+            num_examples=args.num_examples,
+            max_time_steps=args.max_time_steps,
+        )
+        _show_image_grid(grid, title="Masked inputs (top) and reconstructions (bottom)")
+
     plt.show()
     

@@ -104,7 +104,7 @@ class CCModule(nn.Module):
     '''
     def __init__(self, spatial_dims:tuple[int, int], FF_conv:nn.Conv2d, FB_conv:nn.Conv2d|None, 
                  LAT_ksize:tuple[int, int] = (3,3), activation_fn:nn.Module = nn.Identity(),
-                 time_alpha:float|torch.Tensor | None = 0.1
+                 time_alpha:float|torch.Tensor | None = 0.04
                  ):
         super().__init__()
         assert FF_conv is not None, "Feedforward convolution layer (FF_conv) must be provided."
@@ -123,7 +123,7 @@ class CCModule(nn.Module):
         
         if FB_conv is not None:
             self.Lambda_FB = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
-                                          init_Lambda=0.0, init_lr=5e-3,
+                                          init_Lambda=0.0, init_lr=5e-3, plus_one=True,
                                           learning_rule='dampened_hebbian'
                                           )
         else:
@@ -167,13 +167,16 @@ class CCModule(nn.Module):
         drive = self.Lambda_FF(y_FF)
 
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
-            y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
-            # drive += self.Lambda_FB(y_FB)
+            y_FB = self.FB_conv(context,
+                                # None 
+                                y_FF
+                                ) # y_FF is skip connection from SparK pretraining
+            drive += self.Lambda_FB(y_FB)
             # drive /= 2
 
         # if Y_old is not None:
         y_LAT = self.LAT_conv(drive)
-        # drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
+        drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
         
         # Apply activation function (drive term)
         drive = self.activation_fn(drive)
@@ -193,9 +196,10 @@ class CCModule(nn.Module):
         Local update, leaks back to 0; average over batch
         '''
         # self.Lambda_FF.update(Y, y_FF)
-        self.Lambda_LAT.update(Y, y_LAT)
-        if self.Lambda_FB is not None:
-            self.Lambda_FB.update(Y, y_FB)
+        # self.Lambda_LAT.update(Y, y_LAT)
+        # if self.Lambda_FB is not None:
+        #     self.Lambda_FB.update(Y, y_FB)
+        pass
 
     def reset_dynamic_state(self, ref_tensor:torch.Tensor|None = None)->None:
         self.Lambda_FF.reset(ref_tensor=ref_tensor)

@@ -231,10 +231,6 @@ class SparseNormalizedFusion(nn.Module):
         return x
 
 
-
-
-
-
 class SparseCNNEncoder(nn.Module):
     """
     MNIST-sized sparse encoder (28 -> 14 -> 7 -> 4).
