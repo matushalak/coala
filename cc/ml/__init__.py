@@ -1,6 +1,26 @@
 import os
-AE_logs = os.path.join(os.path.dirname(__file__), "AE_logs", 'lightning_logs')
-MAE_logs = os.path.join(os.path.dirname(__file__), "MAE_logs", 'lightning_logs')
-COALA_logs = os.path.join(os.path.dirname(__file__), "COALA_logs", 'lightning_logs')
-Head_logs = os.path.join(os.path.dirname(__file__), "TaskHeads_logs")
-Classifier_logs = os.path.join(Head_logs, "classifier", "lightning_logs")
+
+_ML_DIR = os.path.dirname(__file__)
+
+AE_logs = os.path.join(_ML_DIR, "AE_logs")
+MAE_logs = os.path.join(_ML_DIR, "MAE_logs")
+COALA_logs = os.path.join(_ML_DIR, "COALA_logs")
+Head_logs = os.path.join(_ML_DIR, "TaskHeads_logs")
+Classifier_logs = os.path.join(Head_logs, "classifier")
+
+AE_LIGHTNING_LOGS = os.path.join(AE_logs, "lightning_logs")
+MAE_LIGHTNING_LOGS = os.path.join(MAE_logs, "lightning_logs")
+COALA_LIGHTNING_LOGS = os.path.join(COALA_logs, "lightning_logs")
+CLASSIFIER_LIGHTNING_LOGS = os.path.join(Classifier_logs, "lightning_logs")
+
+__all__ = [
+    "AE_logs",
+    "MAE_logs",
+    "COALA_logs",
+    "Head_logs",
+    "Classifier_logs",
+    "AE_LIGHTNING_LOGS",
+    "MAE_LIGHTNING_LOGS",
+    "COALA_LIGHTNING_LOGS",
+    "CLASSIFIER_LIGHTNING_LOGS",
+]

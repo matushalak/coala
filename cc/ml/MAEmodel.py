@@ -25,7 +25,8 @@ class MAE(pl.LightningModule):
         num_input_channels: int = 1,
         decoder_densify_mode: str = "random",
         use_skip: bool = True,
-        upconv_method: str = "transposed_conv",
+        upconv_method: str = "upsample+conv",
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -35,7 +36,8 @@ class MAE(pl.LightningModule):
             num_filters=num_filters,
             decoder_densify_mode=decoder_densify_mode,
             use_skip=use_skip,
-            upconv_method=upconv_method
+            upconv_method=upconv_method,
+            norm_type=norm_type,
         )
 
     def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
@@ -174,6 +176,11 @@ def train_mae(args):
 
     pl.seed_everything(args.seed)
     print('Using skip connections in decoder:', args.no_skip)
+    print('Decoder densify mode:', args.decoder_densify_mode)
+    print('Decoder upconv method:', args.upconv_method)
+    print('Encoder & Decoder Norm type:', args.norm_type)
+    
+    # Define model with the specified hyperparameters
     model = MAE(
         num_filters=args.num_filters,
         lr=args.lr,
@@ -184,6 +191,7 @@ def train_mae(args):
         decoder_densify_mode=args.decoder_densify_mode,
         use_skip=args.no_skip,
         upconv_method=args.upconv_method,
+        norm_type=args.norm_type,
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -195,29 +203,33 @@ def train_mae(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument("--num_filters", default=32, type=int, help="Number of channels/filters to use.")
+    # Training params
+    parser.add_argument("--epochs", default=21, type=int, help="Max number of epochs.") # probably less is enough
+    parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate to use.")
+    parser.add_argument("--batch_size", default=128, type=int, help="Minibatch size.")
+    parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
+    
+    # Masking / data params
     parser.add_argument("--mask_ratio", default=0.6, type=float, help="Fraction of patches to hide.")
     parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
     parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels in MSE.")
-    parser.add_argument(
-        "--decoder_densify_mode",
-        default="random",
-        choices=("random", "token", "zero"),
-        type=str,
-        help="How sparse encoder features are filled before decoder local processing.",
-    )
-    parser.add_argument("--upconv_method", default="upsample+conv", choices=("transposed_conv", "upsample+conv"), type=str,
-                        help="Whether to use transposed convolutions or upsample+conv in the decoder.")
+    
+    # Architecture params
+    parser.add_argument("--num_filters", default=32, type=int, 
+                        help="Number of channels/filters to use.")
     parser.add_argument("--num_input_channels", default=1, type=int,
                         help="Number of image channels (1 for MNIST/FashionMNIST, 3 for CIFAR/SVHN).")
-    parser.add_argument("--no_skip", action="store_false", help="Whether to use skip connections in the decoder.")
-
-    parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate to use.")
-    parser.add_argument("--batch_size", default=128, type=int, help="Minibatch size.")
-
+    parser.add_argument("--decoder_densify_mode",default="random",choices=("random", "token", "zero"),type=str,
+                        help="How sparse encoder features are filled before decoder local processing.",)
+    parser.add_argument("--upconv_method", default="upsample+conv", choices=("transposed_conv", "upsample+conv"), type=str,
+                        help="Whether to use transposed convolutions or upsample+conv in the decoder.")
+    parser.add_argument("--norm_type", default="rmsnorm", choices=("layernorm", "rmsnorm"), type=str, 
+                        help="Type of normalization to use in the model.")
+    parser.add_argument("--no_skip", action="store_false", 
+                        help="Whether to use skip connections in the decoder.")
+    
+    # Logging / other params
     parser.add_argument("--data_dir", default="../data/", type=str, help="Directory where to look for the data.")
-    parser.add_argument("--epochs", default=21, type=int, help="Max number of epochs.") # probably less is enough
-    parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
     parser.add_argument("--num_workers",default=10,type=int,
                         help=("Number of workers to use in data loaders. For strict determinism set this to 0."),)
     parser.add_argument("--log_dir", default="MAE_logs", type=str, help="Directory for PyTorch Lightning logs.")

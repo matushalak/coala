@@ -65,7 +65,7 @@ class GlobalResponseNorm(nn.Module):
 
     def __init__(self, n_channels: int, eps: float = 1e-6):
         super().__init__()
-        self.gamma = nn.Parameter(torch.ones(1, n_channels, 1, 1))
+        self.gamma = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
         self.beta = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
         self.eps = eps
 
@@ -81,6 +81,11 @@ class GlobalResponseNorm(nn.Module):
         nx = gx / (gx.mean(dim=1, keepdim=True) + self.eps)
         # Apply scaling and bias
         return self.gamma * (x * nx) + self.beta + x
+    
+
+class SparseGlobalResponseNorm(GlobalResponseNorm):
+    def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+        return super().forward(x, keep_mask=keep_mask) * keep_mask.to(dtype=x.dtype)
         
 
 class SparseConv2d(nn.Conv2d):
@@ -95,6 +100,14 @@ class SparseAvgPooling(nn.AvgPool2d):
     forward = sp_conv_forward
 
 
+# legacy layernorm with incorrect masking
+# class SparseLayerNorm2d(nn.LayerNorm):
+#     '''
+#     Legacy incorrect SparseLayerNorm2d to check older models against
+#     '''
+#     forward = sp_conv_forward
+
+# correct
 class SparseLayerNorm2d(nn.LayerNorm):
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
         reduce_dims = tuple(range(x.ndim - len(self.normalized_shape), x.ndim))
@@ -119,19 +132,46 @@ class SparseRMSNorm2d(nn.RMSNorm):
         return y * mask
 
 
-class SparseGlobalResponseNorm(GlobalResponseNorm):
+class SparseNorm2d(nn.Module):
+    def __init__(self, norm_type: str = "rmsnorm", *args, **kwargs):
+        super().__init__()
+        norm_type = norm_type.lower()
+        if norm_type == "layernorm":
+            self.norm = SparseLayerNorm2d(*args, **kwargs)
+        elif norm_type == "rmsnorm":
+            self.norm = SparseRMSNorm2d(*args, **kwargs)
+        else:
+            raise ValueError(f"Unsupported norm_type {norm_type!r}. Expected 'layernorm' or 'rmsnorm'.")
+
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
-        return super().forward(x, keep_mask=keep_mask) * keep_mask.to(dtype=x.dtype)
+        return self.norm(x, keep_mask)
+
+
+class DenseNorm2d(nn.Module):
+    def __init__(self, norm_type: str = "rmsnorm", *args, **kwargs):
+        super().__init__()
+        norm_type = norm_type.lower()
+        if norm_type == "layernorm":
+            self.norm = nn.LayerNorm(*args, **kwargs)
+        elif norm_type == "rmsnorm":
+            self.norm = nn.RMSNorm(*args, **kwargs)
+        else:
+            raise ValueError(f"Unsupported norm_type {norm_type!r}. Expected 'layernorm' or 'rmsnorm'.")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x)
 
 
 class SparseResidualConv2d(nn.Module):
     """Residual block that keeps sparse positions zeroed after each operation."""
 
-    def __init__(self, n_channels: int, spatial_dim: tuple[int, int], kernel_size: int = 3):
+    def __init__(self, n_channels: int, spatial_dim: tuple[int, int], kernel_size: int = 3,
+                 norm_type: str = "rmsnorm"):
         super().__init__()
         self.conv1 = SparseConv2d(n_channels, n_channels, kernel_size=kernel_size, padding="same", stride=1)
-        self.norm1 = SparseLayerNorm2d((n_channels, *spatial_dim))
+        self.norm1 = SparseNorm2d(norm_type=norm_type, normalized_shape=(n_channels, *spatial_dim))
         self.act = nn.GELU()
+        self.grn = SparseGlobalResponseNorm(n_channels) # global response norm from convnextv2 paper
         self.conv2 = SparseConv2d(n_channels, n_channels, kernel_size=kernel_size, padding="same", stride=1)
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
@@ -139,9 +179,10 @@ class SparseResidualConv2d(nn.Module):
         y = self.conv1(x, keep_mask)
         y = self.norm1(y, keep_mask)
         y = self.act(y)
+        y = self.grn(y, keep_mask) # calibrate channels with GRN
         y = y * mask  # GELU can re-introduce non-zero values on inactive positions.
         y = self.conv2(y, keep_mask)
-        return x + y
+        return x + y # residual connection
 
 
 class SparseLocalStage(nn.Module):
@@ -159,74 +200,28 @@ class SparseLocalStage(nn.Module):
         spatial_dim: tuple[int, int],
         use_residual: bool = True,
         kernel_size: int = 3,
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
-        self.norm = SparseLayerNorm2d((n_channels, *spatial_dim))
+        self.pre_norm = SparseNorm2d(norm_type=norm_type, normalized_shape=(n_channels, *spatial_dim))
         self.act = nn.GELU()
         self.block = (
-            SparseResidualConv2d(n_channels, spatial_dim=spatial_dim, kernel_size=kernel_size)
+            SparseResidualConv2d(n_channels, spatial_dim=spatial_dim, kernel_size=kernel_size, norm_type=norm_type)
             if use_residual
             else None
         )
+        self.post_norm = SparseNorm2d(norm_type=norm_type, normalized_shape=(n_channels, *spatial_dim))
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
-        x = self.norm(x, keep_mask)
+        x = self.pre_norm(x, keep_mask)
         x = self.act(x)
         x = x * keep_mask.to(dtype=x.dtype)
         if self.block is not None:
             x = self.block(x, keep_mask)
-        return x
-
-    
-class DenseLocalStage(nn.Module):
-    """
-    Local (same-resolution) dense processing for decoder feature maps after densification.
-
-    Stage contract:
-    - input/output keep the same spatial resolution
-    - standard dense operations (e.g., LayerNorm, residuals) can be used without masking
-    """
-
-    def __init__(
-        self,
-        n_channels: int,
-        spatial_dim: tuple[int, int],
-        use_residual: bool = True,
-        kernel_size: int = 3,
-    ):
-        super().__init__()
-        self.norm = nn.LayerNorm((n_channels, *spatial_dim))
-        self.act = nn.GELU()
-        self.block = (
-            DenseResidualConv2d(n_channels, spatial_dim=spatial_dim, kernel_size=kernel_size)
-            if use_residual
-            else None
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm(x)
-        x = self.act(x)
-        if self.block is not None:
-            x = self.block(x)
+        x = self.post_norm(x, keep_mask)
         return x
 
 
-class DenseResidualConv2d(nn.Module):
-    """Standard residual block for decoder dense feature maps."""
-
-    def __init__(self, n_channels: int, spatial_dim: tuple[int, int], kernel_size: int = 3):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(n_channels, n_channels, kernel_size=kernel_size, padding="same", stride=1),
-            nn.LayerNorm((n_channels, *spatial_dim)),
-            nn.GELU(),
-            nn.Conv2d(n_channels, n_channels, kernel_size=kernel_size, padding="same", stride=1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.block(x)
-    
-# TODO: integrate this option into the decoder
 class DenseUpConv2d(nn.Module):
     """
     Upsampling for decoder dense feature maps.
@@ -276,6 +271,59 @@ class DenseUpConv2d(nn.Module):
         return self.upconv(x)
 
 
+class DenseResidualConv2d(nn.Module):
+    """Standard residual block for decoder dense feature maps."""
+
+    def __init__(self, n_channels: int, spatial_dim: tuple[int, int], kernel_size: int = 3, norm_type: str = "rmsnorm"):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(n_channels, n_channels, kernel_size=kernel_size, padding="same", stride=1),
+            DenseNorm2d(norm_type=norm_type, normalized_shape=(n_channels, *spatial_dim)),
+            nn.GELU(),
+            GlobalResponseNorm(n_channels), # global response norm from convnextv2 paper
+            nn.Conv2d(n_channels, n_channels, kernel_size=kernel_size, padding="same", stride=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.block(x)
+
+
+class DenseLocalStage(nn.Module):
+    """
+    Local (same-resolution) dense processing for decoder feature maps after densification.
+
+    Stage contract:
+    - input/output keep the same spatial resolution
+    - standard dense operations (e.g., LayerNorm, residuals) can be used without masking
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        spatial_dim: tuple[int, int],
+        use_residual: bool = True,
+        kernel_size: int = 3,
+        norm_type: str = "rmsnorm",
+    ):
+        super().__init__()
+        self.pre_norm = DenseNorm2d(norm_type=norm_type, normalized_shape=(n_channels, *spatial_dim))
+        self.act = nn.GELU()
+        self.block = (
+            DenseResidualConv2d(n_channels, spatial_dim=spatial_dim, kernel_size=kernel_size, norm_type=norm_type)
+            if use_residual
+            else None
+        )
+        self.post_norm = DenseNorm2d(norm_type=norm_type, normalized_shape=(n_channels, *spatial_dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pre_norm(x)
+        x = self.act(x)
+        if self.block is not None:
+            x = self.block(x)
+        x = self.post_norm(x)
+        return x
+
+
 class SparseCNNEncoder(nn.Module):
     """
     MNIST-sized sparse encoder (28 -> 14 -> 7 -> 4).
@@ -286,23 +334,23 @@ class SparseCNNEncoder(nn.Module):
     - returned feats are post-local / pre-next-transition states
     """
 
-    def __init__(self, num_input_channels: int = 1, num_filters: int = 32):
+    def __init__(self, num_input_channels: int = 1, num_filters: int = 32, norm_type: str = "rmsnorm"):
         super().__init__()
         # V1
         self.down28_to_28 = SparseConv2d(num_input_channels, num_filters // 2, kernel_size=3, padding=1, stride=1)
-        self.local28 = SparseLocalStage(num_filters // 2, spatial_dim=(28, 28), use_residual=True, kernel_size=3)
+        self.local28 = SparseLocalStage(num_filters // 2, spatial_dim=(28, 28), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # V2
         self.down28_to_14 = SparseConv2d(num_filters // 2, num_filters, kernel_size=3, padding=1, stride=2)
-        self.local14 = SparseLocalStage(num_filters, spatial_dim=(14, 14), use_residual=True, kernel_size=3)
+        self.local14 = SparseLocalStage(num_filters, spatial_dim=(14, 14), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # V3
         self.down14_to_7 = SparseConv2d(num_filters, 2 * num_filters, kernel_size=3, padding=1, stride=2)
-        self.local7 = SparseLocalStage(2 * num_filters, spatial_dim=(7, 7), use_residual=True, kernel_size=3)
+        self.local7 = SparseLocalStage(2 * num_filters, spatial_dim=(7, 7), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # V4
         self.down7_to_4 = SparseConv2d(2 * num_filters, 4 * num_filters, kernel_size=3, padding=1, stride=2)
-        self.local4 = SparseLocalStage(4 * num_filters, spatial_dim=(4, 4), use_residual=False, kernel_size=3)
+        self.local4 = SparseLocalStage(4 * num_filters, spatial_dim=(4, 4), use_residual=False, kernel_size=3, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> dict[str, torch.Tensor]:
         x = x.float()
@@ -350,7 +398,8 @@ class SparseCNNDecoder(nn.Module):
         num_filters: int = 32,
         densify_mode: str = "random",
         conv_method: Literal['transposed_conv', 'upsample+conv'] = "transposed_conv",
-        use_skip:bool = True
+        use_skip:bool = True,
+        norm_type: str = "rmsnorm"
     ):
         super().__init__()
         self.conv_method = conv_method
@@ -372,25 +421,26 @@ class SparseCNNDecoder(nn.Module):
         nn.init.normal_(self.mask_token4, mean=0.0, std=0.02)
 
         # V4
-        self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=False, kernel_size=3)
+        self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=False, kernel_size=3, norm_type=norm_type)
         
         # V3
         # self.up4_to_7 = nn.ConvTranspose2d(c4, c7, kernel_size=3, output_padding=0, padding=1, stride=2)
         self.up4_to_7 = DenseUpConv2d(c4, c7, kernel_size=3, padding=1, stride=2, output_padding=0, method=conv_method)
-        self.local7 = DenseLocalStage(c7, spatial_dim=(7, 7), use_residual=True, kernel_size=3)
+        self.local7 = DenseLocalStage(c7, spatial_dim=(7, 7), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # V2
         # self.up7_to_14 = nn.ConvTranspose2d(c7, c14, kernel_size=3, output_padding=1, padding=1, stride=2)
         self.up7_to_14 = DenseUpConv2d(c7, c14, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
-        self.local14 = DenseLocalStage(c14, spatial_dim=(14, 14), use_residual=True, kernel_size=3)
+        self.local14 = DenseLocalStage(c14, spatial_dim=(14, 14), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # V1
         # self.up14_to_28 = nn.ConvTranspose2d(c14,c28,kernel_size=3,output_padding=1,padding=1,stride=2,)
         self.up14_to_28 = DenseUpConv2d(c14, c28, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
-        self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=3)
+        self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # Predict output (retina)        
         self.up28_to_out = nn.Conv2d(c28, num_output_channels, kernel_size=3, padding=1, stride=1)
+        nn.init.xavier_uniform_(self.up28_to_out.weight)
 
     def set_densify_mode(self, mode: str) -> None:
         if mode not in self.DENSIFY_MODES:
@@ -404,7 +454,7 @@ class SparseCNNDecoder(nn.Module):
             return torch.zeros_like(feat)
         if self.densify_mode == "random":
             # Random noise on pixels of each masked patch
-            return torch.randn_like(feat)
+            return torch.randn_like(feat) * 0.1
         raise RuntimeError(f"Unsupported densify_mode: {self.densify_mode}")
 
     def _densify(self, feat: torch.Tensor, keep_mask: torch.BoolTensor, mask_token: torch.Tensor) -> torch.Tensor:
@@ -450,16 +500,19 @@ class SparseCNNUNet(nn.Module):
         num_filters: int = 32,
         decoder_densify_mode: str = "random",
         use_skip:bool = True,
-        upconv_method: Literal['transposed_conv', 'upsample+conv'] = "transposed_conv"
+        upconv_method: Literal['transposed_conv', 'upsample+conv'] = "upsample+conv",
+        norm_type: str = "rmsnorm"
     ):
         super().__init__()
-        self.encoder = SparseCNNEncoder(num_input_channels=num_input_channels, num_filters=num_filters)
+        self.encoder = SparseCNNEncoder(num_input_channels=num_input_channels, 
+                                        num_filters=num_filters, norm_type=norm_type)
         self.decoder = SparseCNNDecoder(
             num_output_channels=num_output_channels,
             num_filters=num_filters,
             densify_mode=decoder_densify_mode,
             use_skip=use_skip,
-            conv_method=upconv_method
+            conv_method=upconv_method,
+            norm_type=norm_type
             )
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:

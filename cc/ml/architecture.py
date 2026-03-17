@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 import torch
 import torch.nn as nn
 from typing import Literal
@@ -9,6 +10,7 @@ from cc.ml.utils import load_checkpoint
 from cc.ml.heads.classifier import ClassifierHead
 from cc.ml.cc_modules import CCModule
 from cc.datasets.msmnist import msmnist, visualize_msmnist_examples
+from cc.ml.visualize_activation_maps import create_activation_input_figure, create_activation_map_figure
 
 class COALANet(nn.Module):
     '''
@@ -49,15 +51,27 @@ class COALANet(nn.Module):
         self.eval() # by default keep all parameters frozen
 
     @torch.no_grad()
-    def forward(self, x:torch.Tensor)->torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_activation_maps: bool = False,
+    ) -> list[torch.Tensor] | dict[str, list[torch.Tensor] | dict[str, dict[str, torch.Tensor]]]:
         ''''
         Expects tensor with temporal dimension of shape (B, T, C, H, W).
-        Returns outputs for each timestep in the batch
+        Returns outputs for each timestep in the batch.
+        When ``return_activation_maps`` is True, also returns per-layer activation maps
+        for ``Y``, ``y_FF``, and ``y_FB`` averaged across channels with shape (B, T, H, W).
         '''
         # Initialize hidden state (all layers start with zero hidden state)
         Y_old_activations = {f'L{i}': torch.zeros((x.shape[0], *l.dims_), device=x.device, dtype=x.dtype) 
                              for i, l in enumerate(self.cc_layers)}
         outputs_per_timestep = []
+        activation_maps = None
+        if return_activation_maps:
+            activation_maps = {
+                signal_name: {f"L{i}": [] for i in range(self.n_layers)}
+                for signal_name in ("Y", "y_FF", "y_FB")
+            }
         for t in range(x.shape[1]): # iterate over time dimension
             Y_new_activations = {f'L{i}': None  for i in range(self.n_layers)}
             yff = x[:, t, ...]
@@ -67,6 +81,10 @@ class COALANet(nn.Module):
                 yfb = Y_old_activations.get(f'L{il+1}', None) 
                 layer_outputs = layer(yff, yfb, Y_old_activations[f'L{il}'])
                 Y_new_activations[f'L{il}'] = layer_outputs[0]
+                if activation_maps is not None:
+                    activation_maps["Y"][f"L{il}"].append(layer_outputs[0].mean(dim=1))
+                    activation_maps["y_FF"][f"L{il}"].append(layer_outputs[1].mean(dim=1))
+                    activation_maps["y_FB"][f"L{il}"].append(layer_outputs[2].mean(dim=1))
                 if self.dynamic_updates:
                     layer.update(*layer_outputs)
                 if self.mode == "generative" and il == 0:
@@ -84,7 +102,12 @@ class COALANet(nn.Module):
             # Update activations for all layers at once
             Y_old_activations.update(Y_new_activations)
             outputs_per_timestep.append(out)
-        return outputs_per_timestep
+        if activation_maps is None:
+            return outputs_per_timestep
+        return {
+            "outputs_per_timestep": outputs_per_timestep,
+            "activation_maps": stack_temporal_activation_maps(activation_maps),
+        }
 
     def set_mode(self, mode: Literal["discriminative", "generative"]) -> None:
         if mode not in self.MODES:
@@ -105,7 +128,11 @@ class COALANet(nn.Module):
                         if self.data_dims[1] % (2 ** i) == 0 and self.data_dims[2] % (2 ** i) == 0 
                         else ((self.data_dims[1] // (2 ** i))+1, (self.data_dims[2] // (2 ** i))+1)
                         for i in range(self.n_layers)]
-
+        
+        # NOTE: slower time constants deeper in network
+        # time_constants = [0.2, 0.1, 0.05, 0.025]
+        time_constants = [0.08] * self.n_layers # same time constant across network layers
+        
         self.cc_layers = nn.ModuleList()
         src = self.data_dims[1]
         for il, spatial_dim in enumerate(spatial_dims):
@@ -126,7 +153,7 @@ class COALANet(nn.Module):
             FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local, local_processing0=FB_local0
                                 ) if FB_upconv is not None else None
             # print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
-            layer = CCModule(spatial_dim, FF_conv, FB_conv)
+            layer = CCModule(spatial_dim, FF_conv, FB_conv, time_alpha=time_constants[il])
             self.cc_layers.append(layer)
             src = dst
         
@@ -238,12 +265,30 @@ class FB_Conv2d(nn.Module):
 def load_pretrained_weights(
     mode: Literal["discriminative", "generative"] = "discriminative",
 )->COALANet:
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
+    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_14/checkpoints/epoch=20-step=8862.ckpt"
+    mae_checkpoint = torch.load(mae_checkpoint_path, map_location="cpu", weights_only=False)
+    mae_hparams = dict(mae_checkpoint.get("hyper_parameters", {}))
+    mae_num_input_channels = int(mae_hparams.get("num_input_channels", 1))
+    mae_num_filters = int(mae_hparams.get("num_filters", 32))
+    mae_decoder_densify_mode = str(mae_hparams.get("decoder_densify_mode", "random"))
+    mae_use_skip = bool(mae_hparams.get("use_skip", True))
+    mae_upconv_method = str(mae_hparams.get("upconv_method", "upsample+conv"))
+    # Older MAE checkpoints predate this hparam and used LayerNorm throughout.
+    mae_norm_type = str(mae_hparams.get("norm_type", "layernorm"))
+
     # Define pre-trained autoencoder model
-    mae_model = SparseCNNUNet(num_input_channels=1, num_output_channels=1, num_filters=32,
-                              upconv_method="upsample+conv")
+    mae_model = SparseCNNUNet(
+        num_input_channels=mae_num_input_channels,
+        num_output_channels=mae_num_input_channels,
+        num_filters=mae_num_filters,
+        decoder_densify_mode=mae_decoder_densify_mode,
+        use_skip=mae_use_skip,
+        upconv_method=mae_upconv_method,
+        norm_type=mae_norm_type,
+    )
     # Load pre-trained autoencoder weights (replace with actual checkpoint path)
-    mae_checkpoint_path = f"{MAE_logs}/version_13/checkpoints/epoch=19-step=8440.ckpt"
-    load_checkpoint(mae_model, mae_checkpoint_path)
+    load_checkpoint(mae_model, mae_checkpoint_path, strict=False)
     encoder:SparseCNNEncoder = mae_model.encoder
     decoder:SparseCNNDecoder = mae_model.decoder
     
@@ -256,10 +301,11 @@ def load_pretrained_weights(
             latent_dim=32*4, # latent dimension from the MAE model 
             lr=1e-3,
             freeze_encoder=True,
-            upconv_method = 'upsample+conv')
+            upconv_method=mae_upconv_method,
+        )
         # Load pre-trained classifier weights
-        classifier_checkpoint_path = f"{Classifier_logs}/version_23/checkpoints/epoch=9-step=4220.ckpt"
-        load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False)
+        classifier_checkpoint_path = f"{Classifier_logs}/lightning_logs/version_24/checkpoints/epoch=8-step=3798.ckpt"
+        load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False, strict=False)
         # Extract the classifier head
         mnist_classifier_head = mnist_classifier.head
 
@@ -280,6 +326,17 @@ def stack_temporal_outputs(
     if expected_ndim is not None and stacked.dim() != expected_ndim:
         raise ValueError(f"Expected tensor with {expected_ndim} dims, got shape {tuple(stacked.shape)}.")
     return stacked
+
+
+def stack_temporal_activation_maps(
+    activation_maps: dict[str, dict[str, list[torch.Tensor] | torch.Tensor]],
+) -> dict[str, dict[str, torch.Tensor]]:
+    stacked_maps: dict[str, dict[str, torch.Tensor]] = {}
+    for signal_name, per_layer_maps in activation_maps.items():
+        stacked_maps[signal_name] = {}
+        for layer_name, maps in per_layer_maps.items():
+            stacked_maps[signal_name][layer_name] = stack_temporal_outputs(maps, expected_ndim=4)
+    return stacked_maps
 
 
 def stack_temporal_logits(logits:list[torch.Tensor] | torch.Tensor)->torch.Tensor:
@@ -428,22 +485,39 @@ def _parse_masked_fill_arg(masked_fill: str) -> str | float:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-        "--mode",
-        default="discriminative",
-        choices=("discriminative", "generative"),
-        type=str,
-        help="Which COALANet readout mode to demo.",
-    )
-    parser.add_argument("--num_examples", default=1, type=int, help="Number of examples to visualize.")
-    parser.add_argument("--number_of_masks", default=200, type=int, help="Distinct masks per sample.")
-    parser.add_argument("--timesteps_per_mask", default=1, type=int, help="How long each mask is reused.")
-    parser.add_argument("--mask_ratio", default=0.5, type=float, help="Fraction of masked patches.")
-    parser.add_argument("--patch_size", default=4, type=int, help="Size of each patch.")
-    parser.add_argument("--masked_fill", default="random", type=str, help="Masked pixel fill value or 'random'.")
-    parser.add_argument("--accepted_digits", nargs="*", type=int, default=None, help="Optional subset of digits.")
-    parser.add_argument("--max_time_steps", default=16, type=int, help="Max timesteps shown in reconstruction grids.")
-    parser.add_argument("--hide_input_grid", action="store_true", help="Skip showing the masked input sequence grid.")
+    # Task and model configuration
+    parser.add_argument("--mode",default="discriminative",choices=("discriminative", "generative"),type=str,
+                        help="Which COALANet readout mode to demo.",)
+    parser.add_argument("--masked_fill", default="random", type=str, 
+                        help="Masked pixel fill value or 'random'.")
+    
+    # Data stream configuration
+    parser.add_argument("--num_examples", default=1, type=int, 
+                        help="Number of examples to visualize.")
+    parser.add_argument("--accepted_digits", nargs="*", type=int, default=None, 
+                        help="Optional subset of digits.")
+    
+    # Masking configuration (for input stream)
+    parser.add_argument("--number_of_masks", default=20, type=int, 
+                        help="Distinct masks per sample.")
+    parser.add_argument("--timesteps_per_mask", default=1, type=int, 
+                        help="How long each mask is reused.")
+    parser.add_argument("--mask_ratio", default=0.5, type=float, 
+                        help="Fraction of masked patches.")
+    parser.add_argument("--patch_size", default=4, type=int, 
+                        help="Size of each patch.")
+    
+    # Visualization configuration
+    parser.add_argument("--max_time_steps", default=30, type=int, 
+                        help="Max timesteps shown in reconstruction grids.")
+    parser.add_argument("--hide_input_grid", action="store_true", 
+                        help="Skip showing the masked input sequence grid.")
+    parser.add_argument("--hide_activation_maps", action="store_true", 
+                        help="Skip showing temporal activation-map figures.")
+    parser.add_argument("--activation_map_sample_idx", default=0, type=int, 
+                        help="Which batch example to use for activation-map figures.")
+    parser.add_argument("--activation_map_output_dir",default=None,type=str,
+                        help="Optional directory where activation-map PNGs are saved.",)
     args = parser.parse_args()
 
     target_type = "image" if args.mode == "generative" else "label"
@@ -461,7 +535,13 @@ if __name__ == "__main__":
     )
 
     with torch.no_grad():
-        outputs = coalanet(examples)
+        model_result = coalanet(examples, return_activation_maps=not args.hide_activation_maps)
+    if isinstance(model_result, dict):
+        outputs = model_result["outputs_per_timestep"]
+        activation_maps = model_result["activation_maps"]
+    else:
+        outputs = model_result
+        activation_maps = None
 
     import matplotlib.pyplot as plt
 
@@ -478,6 +558,45 @@ if __name__ == "__main__":
             max_time_steps=args.max_time_steps,
         )
         _show_image_grid(grid, title="Masked inputs (top) and reconstructions (bottom)")
+
+    if activation_maps is not None:
+        if not (0 <= args.activation_map_sample_idx < examples.shape[0]):
+            raise ValueError(
+                f"activation_map_sample_idx must be in [0, {examples.shape[0] - 1}], "
+                f"got {args.activation_map_sample_idx}."
+            )
+        save_dir = None
+        if args.activation_map_output_dir is not None:
+            save_dir = Path(args.activation_map_output_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+        if not args.hide_input_grid or save_dir is not None:
+            input_fig = create_activation_input_figure(
+                examples,
+                sample_idx=args.activation_map_sample_idx,
+                max_time_steps=args.max_time_steps,
+            )
+            if save_dir is not None:
+                input_fig.savefig(
+                    save_dir / f"{args.mode}_inputs_sample{args.activation_map_sample_idx}.png",
+                    dpi=200,
+                    bbox_inches="tight",
+                )
+
+        for layer_name in activation_maps["Y"].keys():
+            layer_fig = create_activation_map_figure(
+                activation_maps,
+                layer_name=layer_name,
+                sample_idx=args.activation_map_sample_idx,
+                max_time_steps=args.max_time_steps,
+                mode=args.mode,
+            )
+            if save_dir is not None:
+                layer_fig.savefig(
+                    save_dir / f"{args.mode}_{layer_name}_sample{args.activation_map_sample_idx}.png",
+                    dpi=200,
+                    bbox_inches="tight",
+                )
 
     plt.show()
     

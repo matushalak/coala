@@ -54,16 +54,24 @@ class ClassifierHead(TaskHead):
         map_location: str | torch.device = "cpu",
         upconv_method: str = "transposed_conv",
     ):
-        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
         hparams = checkpoint.get("hyper_parameters", {})
         num_input_channels = hparams.get("num_input_channels", num_input_channels)
         num_filters = hparams.get("num_filters", num_filters)
+        decoder_densify_mode = str(hparams.get("decoder_densify_mode", "random"))
+        use_skip = bool(hparams.get("use_skip", True))
+        upconv_method = str(hparams.get("upconv_method", upconv_method))
+        # Older MAE checkpoints predate this hparam and used LayerNorm throughout.
+        norm_type = str(hparams.get("norm_type", "layernorm"))
 
         unet = SparseCNNUNet(
             num_input_channels=num_input_channels,
             num_output_channels=num_input_channels,
             num_filters=num_filters,
+            decoder_densify_mode=decoder_densify_mode,
+            use_skip=use_skip,
             upconv_method=upconv_method,
+            norm_type=norm_type,
         )
         state_dict = checkpoint.get("state_dict", checkpoint)
         if any(k.startswith("model.") for k in state_dict):

@@ -173,7 +173,10 @@ class CCModule(nn.Module):
 
         # if Y_old is not None:
         y_LAT = self.LAT_conv(drive)
-        drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
+        # drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
+        
+        # Prediction error?
+        # drive -= (y_FB - y_FF)
         
         # Apply activation function (drive term)
         drive = self.activation_fn(drive)
@@ -182,7 +185,7 @@ class CCModule(nn.Module):
         if Y_old is None:
             Y = drive
         else:
-            Y = Y_old + self.time_alpha * (drive - Y_old)
+            Y = ((1 - self.time_alpha) * Y_old) + (self.time_alpha * drive)
         
         return Y, y_FF, y_FB, y_LAT # return all drives for local update
     
