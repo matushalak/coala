@@ -104,7 +104,7 @@ class CCModule(nn.Module):
     '''
     def __init__(self, spatial_dims:tuple[int, int], FF_conv:nn.Conv2d, FB_conv:nn.Conv2d|None, 
                  LAT_ksize:tuple[int, int] = (3,3), activation_fn:nn.Module = nn.Identity(),
-                 time_alpha:float|torch.Tensor | None = 0.04
+                 time_alpha:float|torch.Tensor | None = 0.08
                  ):
         super().__init__()
         assert FF_conv is not None, "Feedforward convolution layer (FF_conv) must be provided."
@@ -167,10 +167,7 @@ class CCModule(nn.Module):
         drive = self.Lambda_FF(y_FF)
 
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
-            y_FB = self.FB_conv(context,
-                                # None 
-                                y_FF
-                                ) # y_FF is skip connection from SparK pretraining
+            y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
             drive += self.Lambda_FB(y_FB)
             # drive /= 2
 

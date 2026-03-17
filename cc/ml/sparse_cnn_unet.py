@@ -21,10 +21,67 @@ def sp_conv_forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor):
     return x * keep_mask.to(dtype=x.dtype)
 
 
-def sp_ln_forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor):
-    x = super(type(self), self).forward(x)
-    return x * keep_mask.to(dtype=x.dtype)
+def _expand_keep_mask(x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+    if keep_mask.ndim != x.ndim:
+        raise ValueError(
+            f"keep_mask must have the same rank as x, got {keep_mask.ndim} and {x.ndim}."
+        )
+    if keep_mask.shape[0] != x.shape[0] or keep_mask.shape[-2:] != x.shape[-2:]:
+        raise ValueError(
+            f"keep_mask shape {tuple(keep_mask.shape)} is incompatible with x shape {tuple(x.shape)}."
+        )
+    if keep_mask.shape[1] not in (1, x.shape[1]):
+        raise ValueError(
+            f"keep_mask channel dimension must be 1 or match x, got {keep_mask.shape[1]} and {x.shape[1]}."
+        )
+    return keep_mask.to(dtype=x.dtype).expand_as(x)
 
+
+def _masked_mean_and_var(
+    x: torch.Tensor,
+    keep_mask: torch.BoolTensor,
+    reduce_dims: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mask = _expand_keep_mask(x, keep_mask)
+    masked_x = x * mask
+    count = mask.sum(dim=reduce_dims, keepdim=True).clamp_min(1.0)
+    mean = masked_x.sum(dim=reduce_dims, keepdim=True) / count
+    var = ((x - mean).pow(2) * mask).sum(dim=reduce_dims, keepdim=True) / count
+    return mask, mean, var
+
+
+def _resolve_eps(eps: float | None, x: torch.Tensor) -> float:
+    return torch.finfo(x.dtype).eps if eps is None else eps
+
+
+class GlobalResponseNorm(nn.Module):
+    """
+    Global response normalization (GRN) as used in ConvNeXtV2.
+        GRN normalizes each channel by the global L2 norm across spatial dimensions, 
+        with learnable scaling and bias.
+    
+    Assumes (B, C, H, W) input shape.
+    """
+
+    def __init__(self, n_channels: int, eps: float = 1e-6):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(1, n_channels, 1, 1))
+        self.beta = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor | None = None) -> torch.Tensor:
+        if keep_mask is None:
+            mask = 1.0
+        else:
+            mask = keep_mask.to(dtype=x.dtype)
+
+        # L2 norm "pooling" across spatial dimensions.
+        gx = torch.sqrt((x.pow(2) * mask).sum(dim=[2, 3], keepdim=True))
+        # Competition across channels.
+        nx = gx / (gx.mean(dim=1, keepdim=True) + self.eps)
+        # Apply scaling and bias
+        return self.gamma * (x * nx) + self.beta + x
+        
 
 class SparseConv2d(nn.Conv2d):
     forward = sp_conv_forward
@@ -39,7 +96,32 @@ class SparseAvgPooling(nn.AvgPool2d):
 
 
 class SparseLayerNorm2d(nn.LayerNorm):
-    forward = sp_ln_forward
+    def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+        reduce_dims = tuple(range(x.ndim - len(self.normalized_shape), x.ndim))
+        mask, mean, var = _masked_mean_and_var(x, keep_mask, reduce_dims)
+        eps = _resolve_eps(self.eps, x)
+        y = (x - mean) / torch.sqrt(var + eps)
+        if self.elementwise_affine:
+            y = y * self.weight + self.bias
+        return y * mask
+
+
+class SparseRMSNorm2d(nn.RMSNorm):
+    def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+        reduce_dims = tuple(range(x.ndim - len(self.normalized_shape), x.ndim))
+        mask = _expand_keep_mask(x, keep_mask)
+        count = mask.sum(dim=reduce_dims, keepdim=True).clamp_min(1.0)
+        eps = _resolve_eps(self.eps, x)
+        rms = torch.rsqrt((x.pow(2) * mask).sum(dim=reduce_dims, keepdim=True) / count + eps)
+        y = x * rms
+        if self.elementwise_affine:
+            y = y * self.weight
+        return y * mask
+
+
+class SparseGlobalResponseNorm(GlobalResponseNorm):
+    def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+        return super().forward(x, keep_mask=keep_mask) * keep_mask.to(dtype=x.dtype)
 
 
 class SparseResidualConv2d(nn.Module):
@@ -94,6 +176,7 @@ class SparseLocalStage(nn.Module):
         if self.block is not None:
             x = self.block(x, keep_mask)
         return x
+
     
 class DenseLocalStage(nn.Module):
     """
@@ -191,44 +274,6 @@ class DenseUpConv2d(nn.Module):
             )
             x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=True)
         return self.upconv(x)
-
-# TODO: check with paper and integrate into encoder
-class SparseGlobalResponseNorm(nn.Module):
-    """
-    (sparse) Global response normalization (GRN) as used in ConvNeXtV2.
-        GRN normalizes each channel by the global L2 norm across spatial dimensions, 
-        with learnable scaling and bias.
-    """
-
-    def __init__(self, n_channels: int, eps: float = 1e-6):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(1, n_channels, 1, 1))
-        self.beta = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor, keep_mask:torch.BoolTensor) -> torch.Tensor:
-        # L2 norm "pooling" across spatial dimensions
-        gx = torch.sqrt(x.pow(2).sum(dim=[2, 3], keepdim=True) + self.eps)
-        # Competition across channels
-        nx = gx / (gx.mean(dim=-1, keepdim=True) + self.eps)
-        # Apply scaling and bias
-        out = self.gamma * (x * nx) + self.beta + x
-        return out * keep_mask.to(dtype=out.dtype)
-
-
-class SparseNormalizedFusion(nn.Module):
-    """
-    Normalization gate for fusing FF and FB streams
-    """
-    def __init__(self, n_channels: int, spatial_dim:tuple[int, int]):
-        super().__init__()
-        self.grn = SparseGlobalResponseNorm(n_channels, eps=1e-6)
-        self.norm = SparseLayerNorm2d((n_channels, *spatial_dim))
-    
-    def forward(self, x: torch.Tensor, keep_mask:torch.BoolTensor)->torch.Tensor:
-        x = self.grn(x, keep_mask)
-        x = self.norm(x, keep_mask)
-        return x
 
 
 class SparseCNNEncoder(nn.Module):
