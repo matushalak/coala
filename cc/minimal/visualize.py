@@ -41,8 +41,8 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         weight_rows = training_rows.copy()
 
     builder = FigureBuilder.from_matrix(
-        [["B", "B", "D"],
-         ["C", "C", "E"]],
+        [["A", "A", "B"],
+         ["C", "C", "D"]],
         figsize=(20, 15),
         constrained_layout=False,
         grid_wspace=0.25,
@@ -51,10 +51,10 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         subfigure_hspace=0.2,
     )
     # builder.update_panel("A", subgrid=(3, 2), title=None, label=None)
-    builder.update_panel("B", subgrid=(len(phases), len(conditions)), title="Y activity", label="B")
+    builder.update_panel("A", subgrid=(len(phases), len(conditions)), title="Y activity", label="A")
+    builder.update_panel("B", subgrid=(2, 1), title="Y and PV activity over training", label="B")
     builder.update_panel("C", subgrid=(len(phases), len(conditions)), title="PV activity", label="C")
-    builder.update_panel("D", subgrid=(2, 1), title="Y and PV activity over training", label="D")
-    builder.update_panel("E", subgrid=(4, 1), title="Weight evolution over training", label="E")
+    builder.update_panel("D", subgrid=(4, 1), title="Weight evolution over training", label="D")
 
     x_colors = {0: "green", 1: "gold"}
     c_colors = {0: "magenta", 1: "navy"}
@@ -327,10 +327,10 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
                 ax_grid[i, 0].tick_params(labelbottom=False)
 
     # builder.set_plotter("A", plot_panel_a)
-    builder.set_plotter("B", plot_y)
+    builder.set_plotter("A", plot_y) 
+    builder.set_plotter("B", plot_training_activity)
     builder.set_plotter("C", plot_pv)
-    builder.set_plotter("D", plot_training_activity)
-    builder.set_plotter("E", plot_weight_evolution)
+    builder.set_plotter("D", plot_weight_evolution)
 
     os.makedirs(save_path, exist_ok=True)
     fig, _ = builder.render(save_path=os.path.join(save_path, f"experiment_results_{name}.png"), show=False)

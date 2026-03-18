@@ -454,7 +454,8 @@ class SparseCNNDecoder(nn.Module):
             return torch.zeros_like(feat)
         if self.densify_mode == "random":
             # Random noise on pixels of each masked patch
-            return torch.randn_like(feat) * 0.1
+            # NOTE: are these values too large?
+            return torch.randn_like(feat)# * 0.1
         raise RuntimeError(f"Unsupported densify_mode: {self.densify_mode}")
 
     def _densify(self, feat: torch.Tensor, keep_mask: torch.BoolTensor, mask_token: torch.Tensor) -> torch.Tensor:
