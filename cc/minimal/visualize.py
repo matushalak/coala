@@ -23,7 +23,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
     pre_post_df = long_df.loc[long_df["experiment_phase"].isin(["naive", "expert"])].copy()
     phases = [p for p in ["naive", "expert"] if p in pre_post_df["experiment_phase"].unique()]
     image_types = sorted(pre_post_df["image_type"].dropna().unique().tolist()) if "image_type" in pre_post_df.columns else []
-    conditions = sorted(pre_post_df["condition"].dropna().unique().tolist()) if "condition" in pre_post_df.columns else []
+    conditions = [c for c in ["familiar", "novel"] if c in pre_post_df["condition"].dropna().unique()] if "condition" in pre_post_df.columns else []
     y_df = pre_post_df[["step", "y", "condition", "experiment_phase", "image_type"]].drop_duplicates()
     pv_df = pre_post_df[["step", "pv_value", "pv_index", "condition", "experiment_phase", "image_type"]].drop_duplicates()
     training_rows = long_df.loc[long_df["experiment_phase"].eq("training")].copy()
@@ -41,19 +41,20 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         weight_rows = training_rows.copy()
 
     builder = FigureBuilder.from_matrix(
-        [["A", "A", "B"],
-         ["C", "C", "D"]],
-        figsize=(20, 15),
+        [["A", "A", "A", "A"],
+         ["B", "B", "B", "B"],
+         ["C", "C", "D", "D"]],
+        figsize=(24, 18),
+        height_ratios=[1.0, 1.0, 1.4],
         constrained_layout=False,
         grid_wspace=0.25,
         grid_hspace=0.15,
         subfigure_wspace=0.15,
         subfigure_hspace=0.2,
     )
-    # builder.update_panel("A", subgrid=(3, 2), title=None, label=None)
-    builder.update_panel("A", subgrid=(len(phases), len(conditions)), title="Y activity", label="A")
-    builder.update_panel("B", subgrid=(2, 1), title="Y and PV activity over training", label="B")
-    builder.update_panel("C", subgrid=(len(phases), len(conditions)), title="PV activity", label="C")
+    builder.update_panel("A", subgrid=(1, len(conditions) * len(phases)), title="Y activity", label="A")
+    builder.update_panel("B", subgrid=(1, len(conditions) * len(phases)), title="PV activity", label="B")
+    builder.update_panel("C", subgrid=(2, 1), title="Y and PV activity over training", label="C")
     builder.update_panel("D", subgrid=(4, 1), title="Weight evolution over training", label="D")
 
     x_colors = {0: "green", 1: "gold"}
@@ -95,75 +96,69 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
     X2 = _ensure_two_channels(X2)
     C2 = _ensure_two_channels(C2)
 
+    activity_layout = [(condition, phase) for condition in conditions for phase in phases]
+
     def plot_y(ax_grid, _):
-        for i in range(len(phases)):
-            for j in range(len(conditions)):
-                if i == 0 and j == 0:
-                    continue
-                ax_grid[i, j].sharey(ax_grid[0, 0])
-        for i, phase in enumerate(phases):
-            for j, condition in enumerate(conditions):
-                ax = ax_grid[i, j]
-                cell = y_df[(y_df["experiment_phase"] == phase) & (y_df["condition"] == condition)]
-                cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
-                if cell.empty:
-                    ax.set_visible(False)
-                    continue
-                sns.lineplot(
-                    data=cell,
-                    x="step",
-                    y="y",
-                    hue="image_type",
-                    hue_order=[k for k in ["full", "occlusion", "novel_no_context"] if k in image_types],
-                    style="image_type",
-                    palette=image_colors,
-                    errorbar=None,
-                    ax=ax,
-                    legend=(i == 0 and j == 0),
-                )
-                ax.set_title(f"{phase} | {condition}")
-                if 'un_un' in name:
-                    ax.set_ylim(0, 0.3)
-                if i < len(phases) - 1:
-                    ax.set_xlabel("")
-                    ax.tick_params(labelbottom=False)
-                if j > 0:
-                    ax.set_ylabel("")
-                    ax.tick_params(labelleft=False)
+        flat_axes = np.asarray(ax_grid).reshape(-1)
+        if flat_axes.size == 0:
+            return
+        for ax in flat_axes[1:]:
+            ax.sharey(flat_axes[0])
+        for idx, (condition, phase) in enumerate(activity_layout):
+            ax = flat_axes[idx]
+            cell = y_df[(y_df["experiment_phase"] == phase) & (y_df["condition"] == condition)]
+            cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
+            if cell.empty:
+                ax.set_visible(False)
+                continue
+            sns.lineplot(
+                data=cell,
+                x="step",
+                y="y",
+                hue="image_type",
+                hue_order=[k for k in ["full", "occlusion", "novel_no_context"] if k in image_types],
+                style="image_type",
+                palette=image_colors,
+                errorbar=None,
+                ax=ax,
+                legend=(idx == 0),
+            )
+            ax.set_title(f"{condition} | {phase}")
+            if 'un_un' in name:
+                ax.set_ylim(0, 0.3)
+            if idx > 0:
+                ax.set_ylabel("")
+                ax.tick_params(labelleft=False)
 
     def plot_pv(ax_grid, _):
-        for i in range(len(phases)):
-            for j in range(len(conditions)):
-                if i == 0 and j == 0:
-                    continue
-                ax_grid[i, j].sharey(ax_grid[0, 0])
-        for i, phase in enumerate(phases):
-            for j, condition in enumerate(conditions):
-                ax = ax_grid[i, j]
-                cell = pv_df[(pv_df["experiment_phase"] == phase) & (pv_df["condition"] == condition)]
-                cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
-                if cell.empty:
-                    ax.set_visible(False)
-                    continue
-                sns.lineplot(
-                    data=cell,
-                    x="step",
-                    y="pv_value",
-                    hue="image_type",
-                    hue_order=[k for k in ["novel_no_context","full", "occlusion"] if k in image_types],
-                    palette=image_colors,
-                    style="pv_index",
-                    errorbar=None,
-                    ax=ax,
-                    legend=(i == 0 and j == 0),
-                )
-                ax.set_title(f"{phase} | {condition}")
-                if i < len(phases) - 1:
-                    ax.set_xlabel("")
-                    ax.tick_params(labelbottom=False)
-                if j > 0:
-                    ax.set_ylabel("")
-                    ax.tick_params(labelleft=False)
+        flat_axes = np.asarray(ax_grid).reshape(-1)
+        if flat_axes.size == 0:
+            return
+        for ax in flat_axes[1:]:
+            ax.sharey(flat_axes[0])
+        for idx, (condition, phase) in enumerate(activity_layout):
+            ax = flat_axes[idx]
+            cell = pv_df[(pv_df["experiment_phase"] == phase) & (pv_df["condition"] == condition)]
+            cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
+            if cell.empty:
+                ax.set_visible(False)
+                continue
+            sns.lineplot(
+                data=cell,
+                x="step",
+                y="pv_value",
+                hue="image_type",
+                hue_order=[k for k in ["novel_no_context", "full", "occlusion"] if k in image_types],
+                palette=image_colors,
+                style="pv_index",
+                errorbar=None,
+                ax=ax,
+                legend=(idx == 0),
+            )
+            ax.set_title(f"{condition} | {phase}")
+            if idx > 0:
+                ax.set_ylabel("")
+                ax.tick_params(labelleft=False)
 
     def plot_panel_a(ax_grid, _):
         sketch_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_sketches")
@@ -327,9 +322,9 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
                 ax_grid[i, 0].tick_params(labelbottom=False)
 
     # builder.set_plotter("A", plot_panel_a)
-    builder.set_plotter("A", plot_y) 
-    builder.set_plotter("B", plot_training_activity)
-    builder.set_plotter("C", plot_pv)
+    builder.set_plotter("A", plot_y)
+    builder.set_plotter("B", plot_pv)
+    builder.set_plotter("C", plot_training_activity)
     builder.set_plotter("D", plot_weight_evolution)
 
     os.makedirs(save_path, exist_ok=True)
