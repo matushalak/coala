@@ -15,6 +15,7 @@ def visualize_experiment_results(DF:DataFrame, STIMULI:dict[str, tuple[torch.Ten
     # DF.to_csv(os.path.join(save_path, f"experiment_results_wide_{name}.csv"), index=False)   
     # long_df.to_csv(os.path.join(save_path, f"experiment_results_long_{name}.csv"), index=False)
     visualize_naive_expert_results(long_df, STIMULI=STIMULI, save_path=save_path, name=name)
+    visualize_novel_condition_quickplot(long_df, save_path=save_path, name=name)
     return long_df
 
 
@@ -329,6 +330,68 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
 
     os.makedirs(save_path, exist_ok=True)
     fig, _ = builder.render(save_path=os.path.join(save_path, f"experiment_results_{name}.png"), show=False)
+    plt.close(fig)
+
+
+def visualize_novel_condition_quickplot(long_df: DataFrame, save_path: str = PLOTSDIR, name: str = None) -> None:
+    pre_post_df = long_df.loc[long_df["experiment_phase"].isin(["naive", "expert"])].copy()
+    novel_df = pre_post_df.loc[pre_post_df["condition"].eq("novel")].copy()
+    if novel_df.empty:
+        return
+
+    phases = [p for p in ["naive", "expert"] if p in novel_df["experiment_phase"].unique()]
+    image_types = sorted(novel_df["image_type"].dropna().unique().tolist()) if "image_type" in novel_df.columns else []
+    label_map = {"full": "Nonoccluded", "occlusion": "Occluded", "novel_no_context": "No feedback"}
+    hue_order = [label_map[k] for k in ["full", "occlusion", "novel_no_context"] if k in image_types]
+    y_df = novel_df[["step", "y", "experiment_phase", "image_type"]].drop_duplicates().copy()
+    y_df["plot_condition"] = y_df["image_type"].map(label_map).fillna(y_df["image_type"])
+    image_colors = {"Nonoccluded": "black", "Occluded": "red", "No feedback": "blue"}
+
+    fig, axes = plt.subplots(
+        1,
+        max(1, len(phases)),
+        figsize=(6 * max(1, len(phases)), 4.5),
+        sharey=True,
+        constrained_layout=True,
+    )
+    axes = np.atleast_1d(axes)
+    fig.suptitle("Novel stimulus responses")
+
+    for idx, phase in enumerate(phases):
+        ax = axes[idx]
+        cell = y_df[y_df["experiment_phase"] == phase]
+        cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
+        if cell.empty:
+            ax.set_visible(False)
+            continue
+
+        sns.lineplot(
+            data=cell,
+            x="step",
+            y="y",
+            hue="plot_condition",
+            hue_order=hue_order,
+            style="plot_condition",
+            palette=image_colors,
+            errorbar=None,
+            ax=ax,
+            legend=(idx == len(phases) - 1),
+        )
+        ax.set_title("Naive" if phase == "naive" else "Expert")
+        ax.set_xlabel("Time steps")
+        if name and "un_un" in name:
+            ax.set_ylim(0, 0.3)
+        if idx > 0:
+            ax.set_ylabel("")
+            ax.tick_params(labelleft=False)
+
+    axes[0].set_ylabel("Neural Activity")
+    legend = axes[-1].get_legend()
+    if legend is not None:
+        legend.set_title(None)
+
+    os.makedirs(save_path, exist_ok=True)
+    fig.savefig(os.path.join(save_path, f"experiment_results_{name}_novel_only.png"), bbox_inches="tight")
     plt.close(fig)
 
 def wide_to_long(DF:DataFrame) -> DataFrame:
