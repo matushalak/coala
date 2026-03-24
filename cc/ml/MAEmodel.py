@@ -10,9 +10,14 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from cc.datasets.mnist import mnist
 from cc.ml.sparse_cnn_unet import SparseCNNUNet
 
+
+def _to_display_range(images: torch.Tensor) -> torch.Tensor:
+    return ((images + 1.0) * 0.5).clamp_(0.0, 1.0)
+
+
 class MAE(pl.LightningModule):
     """
-    Bare-bones CNN masked autoencoder for normalized images.
+    Bare-bones CNN masked autoencoder for [-1, 1]-normalized images.
     """
 
     def __init__(
@@ -73,6 +78,9 @@ class MAE(pl.LightningModule):
         return recon, keep_mask
 
     def _reconstruction_loss(self, recon: torch.Tensor, imgs: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
+        """
+        MSE reconstruction loss for [-1, 1] targets.
+        """
         per_pixel_mse = (recon - imgs).pow(2).mean(dim=1)
         masked_pixels = (~keep_mask.squeeze(1)).to(dtype=per_pixel_mse.dtype)
         weights = torch.ones_like(per_pixel_mse) + masked_pixels * (self.hparams.masked_loss_weight - 1.0)
@@ -131,10 +139,10 @@ class ReconstructionCallback(pl.Callback):
         imgs = self._example_batch.to(pl_module.device)
         recon, keep_mask = pl_module.reconstruct(imgs)
 
-        original = imgs.float()
-        grey = 0.5 
-        masked = torch.where(keep_mask, imgs, grey).float()
-        reconstructed = recon.float()
+        original = _to_display_range(imgs.float())
+        grey = 0.5
+        masked = _to_display_range(torch.where(keep_mask, imgs, -1.0).float())
+        reconstructed = _to_display_range(recon.float())
 
         panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
         grid = make_grid(panel, nrow=self.num_images, normalize=False, pad_value=grey)

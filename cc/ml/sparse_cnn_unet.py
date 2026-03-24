@@ -65,7 +65,9 @@ class GlobalResponseNorm(nn.Module):
 
     def __init__(self, n_channels: int, eps: float = 1e-6):
         super().__init__()
-        self.gamma = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
+        self.gamma = nn.Parameter(torch.ones(1, n_channels, 1, 1)
+                                #   *1e-3
+                                  )
         self.beta = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
         self.eps = eps
 
@@ -439,8 +441,8 @@ class SparseCNNDecoder(nn.Module):
         self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # Predict output (retina)        
-        self.up28_to_out = nn.Conv2d(c28, num_output_channels, kernel_size=3, padding=1, stride=1)
-        nn.init.xavier_uniform_(self.up28_to_out.weight)
+        self.up28_to_out = nn.Sequential(nn.Conv2d(c28, num_output_channels, kernel_size=3, padding=1, stride=1),
+                                         nn.Hardtanh(-1, 1))
 
     def set_densify_mode(self, mode: str) -> None:
         if mode not in self.DENSIFY_MODES:
@@ -453,9 +455,8 @@ class SparseCNNDecoder(nn.Module):
         if self.densify_mode == "zero":
             return torch.zeros_like(feat)
         if self.densify_mode == "random":
-            # Random noise on pixels of each masked patch
-            # NOTE: are these values too large?
-            return torch.randn_like(feat)# * 0.1
+            # Zero-mean Gaussian feature noise with moderate scale.
+            return 0.5 * torch.randn_like(feat) # most samples between -1 and 1
         raise RuntimeError(f"Unsupported densify_mode: {self.densify_mode}")
 
     def _densify(self, feat: torch.Tensor, keep_mask: torch.BoolTensor, mask_token: torch.Tensor) -> torch.Tensor:

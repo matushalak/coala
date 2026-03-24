@@ -9,7 +9,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 from cc.datasets.mnist import mnist
 from cc.ml.cnn_unet import CNNEncoder, CNNDecoder
-from cc.ml.utils import visualize_manifold
 
 class AE(pl.LightningModule):
 
@@ -31,13 +30,11 @@ class AE(pl.LightningModule):
         """
         The forward function calculates the AE-loss for a given batch of images.
         Inputs:
-            imgs - Batch of normalized images of shape [B,C,H,W].
+            imgs - Batch of images of shape [B,C,H,W], typically with pixel values in [-1, 1].
         Ouptuts:
             L_rec - The average reconstruction loss of the batch. Shape: single scalar
         """
-        # obtain latent representation from encoder
         z = self.encoder(imgs)
-        # obtain reconstruction from decoder
         recon = self.decoder(z)
         L_rec = F.mse_loss(recon, imgs)
         return L_rec
@@ -56,7 +53,7 @@ class AE(pl.LightningModule):
         # pass through decoder to obtain reconstructed samples
         x_samples = self.decoder(z_samples)
         return x_samples
-    
+
     @torch.no_grad()
     def reconstruct_samples(self, imgs):
         z = self.encoder(imgs)
@@ -211,10 +208,15 @@ def train_ae(args):
 
     # Manifold generation
     if args.z_dim == 2:
-        img_grid = visualize_manifold(model.decoder)
-        save_image(img_grid,
-                   os.path.join(trainer.logger.log_dir, 'ae_manifold.png'),
-                   normalize=False)
+        try:
+            from cc.ml.utils import visualize_manifold
+        except ImportError:
+            print("[WARN] Skipping AE manifold export because cc.ml.utils.visualize_manifold is unavailable.")
+        else:
+            img_grid = visualize_manifold(model.decoder)
+            save_image(img_grid,
+                       os.path.join(trainer.logger.log_dir, 'ae_manifold.png'),
+                       normalize=False)
 
     return test_result
 

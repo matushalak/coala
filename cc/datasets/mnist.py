@@ -24,7 +24,7 @@ from cc import DATADIR
 
 def mnist(root=DATADIR, batch_size=128, num_workers=4, download=True):
     """
-    Returns data loaders for normalized MNIST.
+    Returns data loaders for MNIST with pixel values in [-1, 1].
 
     Inputs:
         root - Directory in which the MNIST dataset should be downloaded. It is better to
@@ -35,13 +35,10 @@ def mnist(root=DATADIR, batch_size=128, num_workers=4, download=True):
         download - If True, MNIST is downloaded if it cannot be found in the specified
                    root directory.
     """
-    # Training-set statistics (MNIST train split).
-    mean = (0.1307,)
-    std = (0.3081,)
     data_transforms = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=(0.5,), std=(0.5,)),
         ]
     )
 

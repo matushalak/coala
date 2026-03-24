@@ -29,14 +29,12 @@ def msmnist(
     where num_timeframes = number_of_masks * timesteps_per_mask.
 
     Targets are labels by default. For generative experiments use target_type="image"
-    to return the clean normalized image as the second item of each batch.
+    to return the clean [-1, 1]-normalized image as the second item of each batch.
     """
-    mean = (0.1307,)
-    std = (0.3081,)
     data_transforms = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=(0.5,), std=(0.5,)),
         ]
     )
 

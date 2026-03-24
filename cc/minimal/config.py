@@ -9,7 +9,7 @@ broad = {
     "n_context": 2,
     "activation": ThresholdReLU(threshold=0),
     "lr_ff": 0.03,
-    "lr_fb": 0.005,
+    "lr_fb": 0.003,
     "lr_lat": 0.01,
     "lr_pv": 0.0025,
     "w_ff_init": {'mu': [0.5, 0.5], 'sigma': 0},
@@ -102,7 +102,7 @@ narrow_familiar.update({
     "w_ff_init": {'mu': [0.9, 0.01], 'sigma': 0},
     "w_fb_init": {'mu': [0.01, 0.01], 'sigma': 0},
     # NOTE: need to already have more PV inhibition for the novel stim. otherwise no reason not to have FF response there as well
-    "w_lat_init": {'mu': [0.5, 1.5], 'sigma': 0}, 
+    "w_lat_init": {'mu': [0.3, 1.5], 'sigma': 0}, 
     "W_pv_init": {'mu': ([0.9, 0.1], [0.1,0.9]), 'sigma': [0, 0]},
     'lr_lat': 0.1
     })
@@ -113,8 +113,9 @@ narrow_familiar.update({
 narrow_novel = broad.copy()
 narrow_novel.update({
     "w_ff_init": {'mu': [0.01, 0.9], 'sigma': 0},
-    "w_fb_init": {'mu': [0.01, 0.01], 'sigma': 0},
+    "w_fb_init": {'mu': [0.01, 0.15], 'sigma': 0}, # a bit of FB initial response to match "averaged" novel neurons
     "w_lat_init": {'mu': [0.3, 0.3], 'sigma': 0},
+    "lr_fb": 0.002,
     })
 
 # Overview
@@ -131,14 +132,14 @@ narrow_novel.update({
 FB_FB = broad.copy()
 FB_FB.update({
     "w_ff_init": {'mu': [1e-7, 1e-7], 'sigma': 0},
-    "w_fb_init": {'mu': [0.5, 0.5], 'sigma': 0},
+    "w_fb_init": {'mu': [0.6, 0.6], 'sigma': 0},
     "w_lat_init": {'mu': [1.5, 1.5], 'sigma': 0},
     "W_pv_init": {'mu': ([1, 0.2], [0.2,1]), 'sigma': [0, 0]},
     })
 
 minimal_configs = {
     "un_un": nonresponder,
-    "un_FF": un_FF, # Hebbian FF and FB plasticity
+    # "un_FF": un_FF, # Hebbian FF and FB plasticity
     "un_FB": un_FB,
     
     "FF_un": FF_un,

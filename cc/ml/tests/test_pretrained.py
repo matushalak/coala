@@ -11,6 +11,10 @@ if __package__ in (None, ""):
 from cc.ml import MAE_logs
 
 
+def _to_display_range(images):
+    return ((images + 1.0) * 0.5).clamp_(0.0, 1.0)
+
+
 def _load_checkpoint(torch, checkpoint_path: Path) -> dict[str, object]:
     return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
@@ -39,9 +43,9 @@ def _compute_batch_metrics(torch, recon, imgs, keep_mask) -> dict[str, object]:
 def _build_reconstruction_grid(torch, torchvision, imgs, keep_mask, recon, num_images: int):
     grey = 0.5
     num_images = max(1, min(num_images, imgs.shape[0]))
-    original = imgs[:num_images].float()
-    masked = torch.where(keep_mask[:num_images], imgs[:num_images], grey).float()
-    reconstructed = recon[:num_images].float()
+    original = _to_display_range(imgs[:num_images].float())
+    masked = _to_display_range(torch.where(keep_mask[:num_images], imgs[:num_images], -1.0).float())
+    reconstructed = _to_display_range(recon[:num_images].float())
     panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
     return torchvision.utils.make_grid(panel, nrow=num_images, normalize=False, pad_value=grey)
 

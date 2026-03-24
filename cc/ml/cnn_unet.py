@@ -50,7 +50,7 @@ class CNNEncoder(nn.Module):
     def forward(self, x):
         """
         Inputs:
-            x - Input batch with normalized images of shape [B,C,H,W].
+            x - Input batch with shape [B,C,H,W], typically with pixel values in [-1, 1].
         Outputs:
             mean - Tensor of shape [B,z_dim] representing the predicted mean of the latent distributions.
             log_std - Tensor of shape [B,z_dim] representing the predicted log standard deviation

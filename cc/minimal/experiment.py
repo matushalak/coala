@@ -4,7 +4,7 @@ from pandas import DataFrame, concat as pd_concat
 from cc.minimal.minimal import CCNeuron
 from cc.minimal.utils import build_res, prepare_collect, collect_outputs
 from cc.minimal.config import *
-from cc.minimal.visualize import visualize_experiment_results
+from cc.minimal.visualize import visualize_experiment_results, visualize_transition_panel
 from cc.utils import randn_reparam
 
 def design_experimental_phase(input_mean:torch.Tensor, input_var:torch.Tensor,
@@ -113,9 +113,29 @@ def run_experiment(model_config:dict, n_steps_per_phase:int = 100) -> DataFrame:
 
 
 if __name__ == "__main__":
+    long_dfs_by_transition: dict[str, DataFrame] = {}
+    shared_stimuli: dict[str, tuple[torch.Tensor, torch.Tensor]] | None = None
+    include_novel_no_context = True
+
     for cfg_name, cfg in minimal_configs.items():
         print(f"Running experiment for config: {cfg_name}")
         df, STIMULI = run_experiment(cfg, n_steps_per_phase=300)
         # for now just return the long format dataframe for visualization
-        df = visualize_experiment_results(df, STIMULI=STIMULI,
-                                          name=cfg_name)
+        long_df = visualize_experiment_results(
+            df,
+            STIMULI=STIMULI,
+            name=cfg_name,
+            include_novel_no_context=include_novel_no_context,
+        )
+        long_dfs_by_transition[cfg_name] = long_df
+        if shared_stimuli is None:
+            shared_stimuli = STIMULI
+
+    if shared_stimuli is not None:
+        for image_mode in ("familiar", "novel", "both"):
+            visualize_transition_panel(
+                long_dfs_by_transition,
+                STIMULI=shared_stimuli,
+                name="transition_panel",
+                image_mode=image_mode,
+            )

@@ -266,7 +266,7 @@ def load_pretrained_weights(
     mode: Literal["discriminative", "generative"] = "discriminative",
 )->COALANet:
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
-    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_14/checkpoints/epoch=20-step=8862.ckpt"
+    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt"
     mae_checkpoint = torch.load(mae_checkpoint_path, map_location="cpu", weights_only=False)
     mae_hparams = dict(mae_checkpoint.get("hyper_parameters", {}))
     mae_num_input_channels = int(mae_hparams.get("num_input_channels", 1))
@@ -349,10 +349,17 @@ def stack_temporal_reconstructions(
     return stack_temporal_outputs(reconstructions, expected_ndim=5)
 
 
+def _to_display_range(images: torch.Tensor) -> torch.Tensor:
+    return ((images + 1.0) * 0.5).clamp_(0.0, 1.0)
+
+
 def compute_temporal_reconstruction_loss(
     reconstructions: list[torch.Tensor] | torch.Tensor,
     targets: torch.Tensor,
 ) -> torch.Tensor:
+    """
+    Per-example, per-timestep MSE for [-1, 1] targets.
+    """
     reconstructions = stack_temporal_reconstructions(reconstructions)
     if targets.dim() != 4:
         raise ValueError(f"Expected targets tensor of shape (B, C, H, W), got {tuple(targets.shape)}.")
@@ -441,8 +448,8 @@ def create_temporal_reconstruction_grid(
 ) -> torch.Tensor:
     from torchvision.utils import make_grid
 
-    reconstructions = stack_temporal_reconstructions(reconstructions).detach().cpu()
-    masked_images = masked_images[:num_examples].detach().cpu()
+    reconstructions = _to_display_range(stack_temporal_reconstructions(reconstructions).detach().cpu())
+    masked_images = _to_display_range(masked_images[:num_examples].detach().cpu())
     reconstructions = reconstructions[:num_examples]
 
     if masked_images.shape[:2] != reconstructions.shape[:2]:
@@ -498,7 +505,7 @@ if __name__ == "__main__":
                         help="Optional subset of digits.")
     
     # Masking configuration (for input stream)
-    parser.add_argument("--number_of_masks", default=20, type=int, 
+    parser.add_argument("--number_of_masks", default=50, type=int, 
                         help="Distinct masks per sample.")
     parser.add_argument("--timesteps_per_mask", default=1, type=int, 
                         help="How long each mask is reused.")
@@ -508,7 +515,7 @@ if __name__ == "__main__":
                         help="Size of each patch.")
     
     # Visualization configuration
-    parser.add_argument("--max_time_steps", default=30, type=int, 
+    parser.add_argument("--max_time_steps", default=50, type=int, 
                         help="Max timesteps shown in reconstruction grids.")
     parser.add_argument("--hide_input_grid", action="store_true", 
                         help="Skip showing the masked input sequence grid.")

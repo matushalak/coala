@@ -1,6 +1,10 @@
 import torch
 import torch.utils.data as data
 
+
+RANDOM_FILL_STD = 0.5
+
+
 class MaskedSequentialDataset(data.Dataset):
     """
     Masked Sequential dataset where 
@@ -136,7 +140,8 @@ class MaskedSequentialDataset(data.Dataset):
         img_t = img.unsqueeze(0)
         if self.masked_fill_mode == "random":
             img_t = img_t.expand(self.num_timeframes, -1, -1, -1)
-            masked_imgs = torch.where(keep, img_t, torch.rand_like(img_t))
+            noise = (RANDOM_FILL_STD * torch.randn_like(img_t)).clamp_(-1.0, 1.0)
+            masked_imgs = torch.where(keep, img_t, noise)
         elif self.masked_fill_value == 0.0:
             masked_imgs = img_t * keep.to(dtype=img.dtype)
         else:

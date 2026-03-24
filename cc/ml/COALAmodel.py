@@ -25,12 +25,16 @@ from cc.ml.heads.classifier import TemporalCEloss
 # Instead simply use pl module for inference with updates and nice logging to tensorboard
 
 
+def _to_display_range(images: torch.Tensor) -> torch.Tensor:
+    return ((images + 1.0) * 0.5).clamp_(0.0, 1.0)
+
+
 def _build_temporal_image_grid(
     images: torch.Tensor,
     num_examples: int = 8,
     max_time_steps: int = 16,
 ) -> torch.Tensor:
-    images = images[:num_examples].detach().cpu()
+    images = _to_display_range(images[:num_examples].detach().cpu())
     _, total_t, _, _, _ = images.shape
     num_time_steps = min(total_t, max_time_steps)
     time_idx = torch.linspace(0, total_t - 1, steps=num_time_steps).round().long()
