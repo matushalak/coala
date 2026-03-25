@@ -67,10 +67,11 @@ def create_activation_map_figure(
                 ax.set_ylabel(signal_name)
             ax.axis("off")
 
-        fig.colorbar(im, ax=axes[row, :].tolist(), fraction=0.02, pad=0.01)
+        # fig.colorbar(im, ax=axes[row, :].tolist(), fraction=0.02, pad=0.01)
 
     title_bits = [layer_name, f"sample {sample_idx}"]
     if mode is not None:
         title_bits.insert(0, mode)
     fig.suptitle(" | ".join(title_bits))
+    fig.tight_layout()
     return fig

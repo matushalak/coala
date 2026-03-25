@@ -130,8 +130,8 @@ class COALANet(nn.Module):
                         for i in range(self.n_layers)]
         
         # NOTE: slower time constants deeper in network
-        # time_constants = [0.2, 0.1, 0.05, 0.025]
-        time_constants = [0.08] * self.n_layers # same time constant across network layers
+        # time_constants = [0.05, 0.04, 0.03, 0.02]
+        time_constants = [0.05] * self.n_layers # same time constant across network layers
         
         self.cc_layers = nn.ModuleList()
         src = self.data_dims[1]
@@ -361,9 +361,13 @@ def compute_temporal_reconstruction_loss(
     Per-example, per-timestep MSE for [-1, 1] targets.
     """
     reconstructions = stack_temporal_reconstructions(reconstructions)
-    if targets.dim() != 4:
-        raise ValueError(f"Expected targets tensor of shape (B, C, H, W), got {tuple(targets.shape)}.")
-    per_pixel_mse = (reconstructions - targets.unsqueeze(1)).pow(2).mean(dim=2)
+    if targets.dim() == 4:
+        per_pixel_mse = (reconstructions - targets.unsqueeze(1)).pow(2).mean(dim=2)
+    elif targets.dim() == 5:
+        per_pixel_mse = (reconstructions - targets).pow(2).mean(dim=2)
+    else:
+        raise ValueError(f"Expected targets tensor of shape (B, C, H, W), or (B, E, C, H, W) got {tuple(targets.shape)}.")
+    
     return per_pixel_mse.mean(dim=(-2, -1))
 
 
@@ -493,7 +497,7 @@ def _parse_masked_fill_arg(masked_fill: str) -> str | float:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     # Task and model configuration
-    parser.add_argument("--mode",default="discriminative",choices=("discriminative", "generative"),type=str,
+    parser.add_argument("--mode",default="generative",choices=("discriminative", "generative"),type=str,
                         help="Which COALANet readout mode to demo.",)
     parser.add_argument("--masked_fill", default="random", type=str, 
                         help="Masked pixel fill value or 'random'.")
@@ -540,6 +544,21 @@ if __name__ == "__main__":
         show=not args.hide_input_grid,
         patch_size=args.patch_size,
     )
+
+    examples2, targets2 = visualize_msmnist_examples(
+        num_examples=args.num_examples,
+        number_of_masks=args.number_of_masks,
+        timesteps_per_mask=args.timesteps_per_mask,
+        mask_ratio=args.mask_ratio,
+        masked_fill=_parse_masked_fill_arg(args.masked_fill),
+        accepted_digits=args.accepted_digits,
+        target_type=target_type,
+        show=not args.hide_input_grid,
+        patch_size=args.patch_size,
+    )
+
+    examples = torch.cat((examples, examples2), dim=1)
+    targets = torch.cat((targets, targets2), dim=1).repeat_interleave(args.number_of_masks * args.timesteps_per_mask, dim=1)
 
     with torch.no_grad():
         model_result = coalanet(examples, return_activation_maps=not args.hide_activation_maps)

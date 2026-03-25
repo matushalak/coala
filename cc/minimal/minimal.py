@@ -86,6 +86,7 @@ class CCNeuron(nn.Module):
         # State variables for PV and pyramidal neurons, implemented as EMAs.
         self.pv = EMA(shape=(n_pv,), alpha=pv_decay)
         self.pyramidal = EMA(shape=(), alpha=pyc_decay)
+        self.adapt = EMA(shape=(), alpha=pyc_decay*0.2)
 
         # EMA of weights to implement decay towards baseline in absence of input (optional)
         # Baselines
@@ -115,12 +116,15 @@ class CCNeuron(nn.Module):
                     + randn_reparam(size=self.pv.ema.shape, mu=0, sigma=0.06) # small random baseline input
                     ) 
         
+        a = self.adapt(self.pyramidal.ema) # update adaptation variable 
+
         y = self.pyramidal(self.activation(
             torch.dot(self.w_ff, x) # feedforward excitation
             + torch.dot(self.w_fb, c * self.receives_context) # feedback excitation
             - torch.dot(self.w_lat, p) # "lateral" inhibition 
             + randn_reparam(size=(), mu=0, sigma=0.01) # small random baseline input
-                            )) 
+            - a # adaptation
+            ))
         
         return x, y, p, c
 

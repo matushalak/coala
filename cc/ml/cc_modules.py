@@ -27,9 +27,7 @@ class LateralInhibition(nn.Module):
         self.n_channels = n_channels
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.conv2d(x, weight=self.weight, padding=self.padding, 
-                        # groups = self.n_channels
-                        )
+        return F.conv2d(x, weight=self.weight, padding=self.padding)
 
 
 class LambdaModule(nn.Module):
@@ -103,7 +101,7 @@ class CCModule(nn.Module):
     Contextual Contrasting recurrent cell module
     '''
     def __init__(self, spatial_dims:tuple[int, int], FF_conv:nn.Conv2d, FB_conv:nn.Conv2d|None, 
-                 LAT_ksize:tuple[int, int] = (3,3), activation_fn:nn.Module = nn.Identity(),
+                 LAT_ksize:tuple[int, int] = (9,9), activation_fn:nn.Module = nn.Identity(),
                  time_alpha:float|torch.Tensor | None = 0.08
                  ):
         super().__init__()
@@ -130,7 +128,7 @@ class CCModule(nn.Module):
             self.Lambda_FB = None
         
         self.Lambda_LAT = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
-                                       init_Lambda=0.0, init_lr=2e-3,
+                                       init_Lambda=0, init_lr=5e-3, plus_one=True,
                                        learning_rule='hebbian')
 
         # activation function (e.g., ReLU)
@@ -172,7 +170,7 @@ class CCModule(nn.Module):
             # drive /= 2
 
         # if Y_old is not None:
-        y_LAT = self.LAT_conv(drive)
+        # y_LAT = self.LAT_conv(drive)
         # drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
         
         # Prediction error?
@@ -199,7 +197,7 @@ class CCModule(nn.Module):
         # self.Lambda_LAT.update(Y, y_LAT)
         # if self.Lambda_FB is not None:
         #     self.Lambda_FB.update(Y, y_FB)
-        pass
+        # pass
 
     def reset_dynamic_state(self, ref_tensor:torch.Tensor|None = None)->None:
         self.Lambda_FF.reset(ref_tensor=ref_tensor)
