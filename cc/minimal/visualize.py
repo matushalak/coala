@@ -43,6 +43,44 @@ TRANSITION_LABELS = {
 TRACE_COLORS = {"full": "black", "occlusion": "red"}
 TRACE_LABELS = {"full": "Nonoccluded", "occlusion": "Occluded"}
 IMAGE_LABELS = {"familiar": "Familiar Image", "novel": "Novel Image"}
+AXIS_LABEL_FONTSIZE = 32
+AXIS_TICK_FONTSIZE = 32
+
+
+def visualize_experiment_results(DF:DataFrame, STIMULI:dict[str, tuple[torch.Tensor, torch.Tensor]], 
+                                 save_path:str = PLOTSDIR, name:str = None,
+                                 include_novel_no_context: bool = False,
+                                 xlim: tuple[float, float] = None)->DataFrame:
+    long_df = wide_to_long(DF)
+    # DF.to_csv(os.path.join(save_path, f"experiment_results_wide_{name}.csv"), index=False)   
+    # long_df.to_csv(os.path.join(save_path, f"experiment_results_long_{name}.csv"), index=False)
+    panel_a_name = f"{name}panel_A" if name is not None else "panel_A"
+    visualize_naive_expert_results(
+        long_df,
+        STIMULI=STIMULI,
+        save_path=save_path,
+        name=name,
+        include_novel_no_context=include_novel_no_context,
+        xlim=xlim
+    )
+    visualize_naive_expert_results(
+        long_df,
+        STIMULI=STIMULI,
+        save_path=save_path,
+        name=panel_a_name,
+        full_plots=False,
+        include_novel_no_context=include_novel_no_context,
+        xlim=xlim
+    )
+    visualize_novel_condition_quickplot(
+        long_df,
+        STIMULI=STIMULI,
+        save_path=save_path,
+        name=name,
+        include_novel_no_context=include_novel_no_context,
+        xlim=xlim,
+    )
+    return long_df
 
 
 def _add_plot_condition_labels(df: DataFrame) -> DataFrame:
@@ -54,6 +92,46 @@ def _add_plot_condition_labels(df: DataFrame) -> DataFrame:
 
 def _plot_condition_order(image_types: list[str]) -> list[str]:
     return [PLOT_CONDITION_LABELS[k] for k in PLOT_CONDITION_ORDER if k in image_types]
+
+
+def _resolve_xlim(xlim: tuple[float, float] | None) -> tuple[float, float]:
+    if xlim is None:
+        return (1000.0, 1350.0)
+    start, end = xlim
+    if start >= end:
+        raise ValueError("xlim must be an increasing (start, end) tuple.")
+    return float(start), float(end)
+
+
+def _panel_time_ticks(
+    xlim: tuple[float, float],
+    stim_windows: dict[str, tuple[float, float] | None],
+    tick_step: float = 100.0,
+) -> tuple[np.ndarray, list[str]]:
+    stim_starts = [interval[0] for interval in stim_windows.values() if interval is not None]
+    reference = min(stim_starts) if stim_starts else (xlim[0] + tick_step)
+    tick_start = float(np.ceil(xlim[0] / tick_step) * tick_step)
+    tick_end = float(np.floor(xlim[1] / tick_step) * tick_step)
+    if tick_end < tick_start:
+        ticks = np.asarray([xlim[0], xlim[1]], dtype=float)
+    else:
+        ticks = np.arange(tick_start, tick_end + 0.5 * tick_step, tick_step, dtype=float)
+
+    labels: list[str] = []
+    for tick in ticks:
+        tick_seconds = (tick - reference) / tick_step
+        rounded = int(round(tick_seconds))
+        if np.isclose(tick_seconds, rounded):
+            labels.append(str(rounded))
+        else:
+            labels.append(f"{tick_seconds:g}")
+    return ticks, labels
+
+
+def _style_axis_fonts(ax, *, tick_labelsize: int = AXIS_TICK_FONTSIZE) -> None:
+    ax.xaxis.label.set_size(AXIS_LABEL_FONTSIZE)
+    ax.yaxis.label.set_size(AXIS_LABEL_FONTSIZE)
+    ax.tick_params(axis="both", labelsize=tick_labelsize)
 
 
 def _to_np_2d(ts: torch.Tensor | np.ndarray) -> np.ndarray:
@@ -273,6 +351,114 @@ def _expand_window_to_event_bounds(
     return expanded_start, expanded_end
 
 
+def _plot_panel_a_activity(
+    ax_grid: np.ndarray,
+    y_df: DataFrame,
+    activity_layout: list[tuple[str, str]],
+    stim_windows: dict[str, tuple[float, float] | None],
+    xlim: tuple[float, float],
+    *,
+    include_novel_no_context: bool = False,
+    image_types: list[str] | None = None,
+) -> None:
+    flat_axes = np.asarray(ax_grid).reshape(-1)
+    if flat_axes.size == 0 or not activity_layout:
+        return
+
+    for ax in flat_axes[len(activity_layout):]:
+        ax.set_visible(False)
+
+    ref_ax = flat_axes[0]
+    for ax in flat_axes[1:len(activity_layout)]:
+        ax.sharex(ref_ax)
+        ax.sharey(ref_ax)
+
+    xticks, xticklabels = _panel_time_ticks(xlim=xlim, stim_windows=stim_windows)
+    available_image_types = set(image_types or y_df["image_type"].dropna().unique().tolist())
+    legend_handles = [
+        Line2D([0], [0], color="black", lw=5.0, label="Nonoccluded (NO)"),
+        Line2D([0], [0], color="red", lw=5.0, label="Occluded (O)"),
+    ]
+    if include_novel_no_context and "novel_no_context" in available_image_types:
+        legend_handles.append(Line2D([0], [0], color="blue", lw=5.0, label="No feedback"))
+
+    global_y_bounds: list[tuple[float, float]] = []
+    for idx, (condition, phase) in enumerate(activity_layout):
+        ax = flat_axes[idx]
+        allowed_image_types = ["full", "occlusion"]
+        if include_novel_no_context and condition == "novel" and "novel_no_context" in available_image_types:
+            allowed_image_types.append("novel_no_context")
+
+        cell = y_df[
+            (y_df["experiment_phase"] == phase)
+            & (y_df["condition"] == condition)
+            & (y_df["image_type"].isin(allowed_image_types))
+        ].copy()
+        cell = cell.loc[(cell.step > xlim[0]) & (cell.step < xlim[1])]
+        if cell.empty:
+            ax.set_visible(False)
+            continue
+
+        trace_specs = [("full", "black"), ("occlusion", "red")]
+        if include_novel_no_context and condition == "novel" and "novel_no_context" in available_image_types:
+            trace_specs.append(("novel_no_context", "blue"))
+
+        for image_type, color in trace_specs:
+            trace = cell.loc[cell["image_type"].eq(image_type)]
+            if trace.empty:
+                continue
+            ax.plot(trace["step"], trace["y"], color=color, lw=5.0)
+            global_y_bounds.append((float(trace["y"].min()), float(trace["y"].max())))
+
+        stim_interval = stim_windows.get(condition)
+        if stim_interval is not None:
+            ax.axvspan(
+                stim_interval[0],
+                stim_interval[1],
+                ymin=0.02,
+                ymax=0.055,
+                color="#8c5a2b",
+                clip_on=False,
+                zorder=3,
+            )
+
+        ax.set_xlim(xlim)
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(xticklabels)
+        ax.set_title(f"{condition.title()} | {phase.title()}", fontsize=19, pad=10)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_linewidth(5.0)
+        ax.spines["bottom"].set_linewidth(5.0)
+        ax.tick_params(axis="both", width=1.6, length=5, labelsize=AXIS_TICK_FONTSIZE)
+        ax.set_xlabel("Time (s)", fontsize=AXIS_LABEL_FONTSIZE)
+        if idx == 0:
+            ax.set_ylabel("Neural Activity", fontsize=AXIS_LABEL_FONTSIZE)
+            ax.legend(
+                handles=legend_handles,
+                loc="upper left",
+                frameon=False,
+                handlelength=2.0,
+                borderaxespad=0.2,
+                fontsize=15,
+            )
+        else:
+            ax.set_ylabel("")
+            ax.tick_params(labelleft=False)
+        _style_axis_fonts(ax)
+
+    if global_y_bounds:
+        y_min = min(bound[0] for bound in global_y_bounds)
+        y_max = max(bound[1] for bound in global_y_bounds)
+        span = y_max - y_min
+        if span <= 0:
+            span = max(abs(y_min), abs(y_max), 0.1)
+        pad = 0.08 * span
+        for ax in flat_axes[:len(activity_layout)]:
+            if ax.get_visible():
+                ax.set_ylim(y_min - pad, y_max + pad)
+
+
 def visualize_transition_panel(
     long_dfs_by_transition: dict[str, DataFrame],
     STIMULI: dict[str, tuple[torch.Tensor, torch.Tensor]],
@@ -326,7 +512,7 @@ def visualize_transition_panel(
     fig, axes = plt.subplots(
         n_rows,
         n_cols,
-        figsize=(2.4 * n_cols + 1.8, 1.15 * n_rows + 1.9),
+        figsize=(5 * n_cols + 1.8, 3 * n_rows + 1.9),
         squeeze=False,
         sharex=True,
         sharey=False,
@@ -351,13 +537,13 @@ def visualize_transition_panel(
         )
 
     for col_idx, (phase, condition) in enumerate(column_specs):
-        axes[0, col_idx].set_title(IMAGE_LABELS.get(condition, condition.title()), fontsize=12, pad=12)
+        axes[0, col_idx].set_title(IMAGE_LABELS.get(condition, condition.title()), fontsize=32, pad=12)
 
     for phase_idx, phase in enumerate(["naive", "expert"]):
         start_col = phase_idx * len(selected_conditions)
         end_col = start_col + len(selected_conditions) - 1
         x_center = 0.5 * (axes[0, start_col].get_position().x0 + axes[0, end_col].get_position().x1)
-        fig.text(x_center, 0.945, phase.title(), ha="center", va="center", fontsize=20)
+        fig.text(x_center, 0.945, phase.title(), ha="center", va="center", fontsize=32)
 
     for row_idx, transition_name in enumerate(ordered_transitions):
         long_df = long_dfs_by_transition[transition_name]
@@ -388,7 +574,7 @@ def visualize_transition_panel(
                     cell["step"].to_numpy(dtype=float),
                     cell["y"].to_numpy(dtype=float),
                     color=TRACE_COLORS.get(trace_type, "black"),
-                    lw=1.4,
+                    lw=5,
                 )
                 row_bounds.append(
                     (
@@ -411,7 +597,7 @@ def visualize_transition_panel(
             transform=label_ax.transAxes,
             ha="right",
             va="center",
-            fontsize=10,
+            fontsize=32,
         )
         if row_bounds:
             row_min = min(bound[0] for bound in row_bounds)
@@ -425,42 +611,18 @@ def visualize_transition_panel(
                     ax.set_ylim(row_min - pad, row_max + pad)
 
     os.makedirs(save_path, exist_ok=True)
-    out_path = os.path.join(save_path, f"{name}_{'_'.join(selected_conditions)}.png")
+    out_path = os.path.join(save_path, f"{name}_{'_'.join(selected_conditions)}.svg")
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
 
-def visualize_experiment_results(DF:DataFrame, STIMULI:dict[str, tuple[torch.Tensor, torch.Tensor]], 
-                                 save_path:str = PLOTSDIR, name:str = None,
-                                 include_novel_no_context: bool = False)->DataFrame:
-    long_df = wide_to_long(DF)
-    # DF.to_csv(os.path.join(save_path, f"experiment_results_wide_{name}.csv"), index=False)   
-    # long_df.to_csv(os.path.join(save_path, f"experiment_results_long_{name}.csv"), index=False)
-    panel_a_name = f"{name}panel_A" if name is not None else "panel_A"
-    visualize_naive_expert_results(
-        long_df,
-        STIMULI=STIMULI,
-        save_path=save_path,
-        name=name,
-        include_novel_no_context=include_novel_no_context,
-    )
-    visualize_naive_expert_results(
-        long_df,
-        STIMULI=STIMULI,
-        save_path=save_path,
-        name=panel_a_name,
-        full_plots=False,
-        include_novel_no_context=include_novel_no_context,
-    )
-    # visualize_novel_condition_quickplot(long_df, save_path=save_path, name=name)
-    return long_df
-
-
 def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[torch.Tensor, torch.Tensor]], 
                                    save_path:str = PLOTSDIR, name:str = None,
                                    full_plots: bool = True,
-                                   include_novel_no_context: bool = False) -> None:
+                                   include_novel_no_context: bool = False,
+                                   xlim: tuple[float, float] = None) -> None:
+    xlim = _resolve_xlim(xlim)
     pre_post_df = long_df.loc[long_df["experiment_phase"].isin(["naive", "expert"])].copy()
     phases = [p for p in ["naive", "expert"] if p in pre_post_df["experiment_phase"].unique()]
     image_types = sorted(pre_post_df["image_type"].dropna().unique().tolist()) if "image_type" in pre_post_df.columns else []
@@ -520,7 +682,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
             subfigure_wspace=0.15,
             subfigure_hspace=0.2,
         )
-        builder.update_panel("A", subgrid=(1, len(conditions) * len(phases)), title=None, label="A")
+        builder.update_panel("A", subgrid=(1, max(1, len(conditions) * len(phases))), title=None, label="A")
 
     x_colors = {0: "green", 1: "gold"}
     c_colors = {0: "magenta", 1: "navy"}
@@ -562,7 +724,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
 
     activity_layout = [(condition, phase) for condition in conditions for phase in phases]
     stim_windows = {
-        condition: _find_stimulus_interval_in_window(STIMULI[condition], step_window=(1000, 1350))
+        condition: _find_stimulus_interval_in_window(STIMULI[condition], step_window=xlim)
         for condition in conditions
         if condition in STIMULI
     }
@@ -576,7 +738,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         for idx, (condition, phase) in enumerate(activity_layout):
             ax = flat_axes[idx]
             cell = y_df[(y_df["experiment_phase"] == phase) & (y_df["condition"] == condition)]
-            cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
+            cell = cell.loc[(cell.step > xlim[0]) & (cell.step < xlim[1])]
             if cell.empty:
                 ax.set_visible(False)
                 continue
@@ -595,6 +757,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
             ax.set_title(f"{condition.title()} | {phase.title()}")
             ax.set_xlabel("Time steps")
             ax.set_ylabel("Neural Activity")
+            _style_axis_fonts(ax)
             if name and 'un_un' in name:
                 ax.set_ylim(0, 0.3)
             legend = ax.get_legend()
@@ -613,7 +776,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         for idx, (condition, phase) in enumerate(activity_layout):
             ax = flat_axes[idx]
             cell = pv_df[(pv_df["experiment_phase"] == phase) & (pv_df["condition"] == condition)]
-            cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
+            cell = cell.loc[(cell.step > xlim[0]) & (cell.step < xlim[1])]
             if cell.empty:
                 ax.set_visible(False)
                 continue
@@ -632,6 +795,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
             ax.set_title(f"{condition.title()} | {phase.title()}")
             ax.set_xlabel("Time steps")
             ax.set_ylabel("Neural Activity")
+            _style_axis_fonts(ax)
             legend = ax.get_legend()
             if legend is not None:
                 legend.set_title(None)
@@ -640,93 +804,15 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
                 ax.tick_params(labelleft=False)
 
     def plot_panel_a(ax_grid, _):
-        flat_axes = np.asarray(ax_grid).reshape(-1)
-        if flat_axes.size == 0:
-            return
-
-        ref_ax = flat_axes[0]
-        for ax in flat_axes[1:]:
-            ax.sharex(ref_ax)
-            ax.sharey(ref_ax)
-
-        legend_handles = [
-            Line2D([0], [0], color="black", lw=2.0, label="Nonoccluded (NO)"),
-            Line2D([0], [0], color="red", lw=2.0, label="Occluded (O)"),
-        ]
-        if include_novel_no_context and "novel" in conditions and "novel_no_context" in image_types:
-            legend_handles.append(Line2D([0], [0], color="blue", lw=2.0, label="No feedback"))
-
-        global_y_bounds: list[tuple[float, float]] = []
-        for idx, (condition, phase) in enumerate(activity_layout):
-            ax = flat_axes[idx]
-            allowed_image_types = ["full", "occlusion"]
-            if include_novel_no_context and condition == "novel":
-                allowed_image_types.append("novel_no_context")
-
-            cell = y_df[
-                (y_df["experiment_phase"] == phase)
-                & (y_df["condition"] == condition)
-                & (y_df["image_type"].isin(allowed_image_types))
-            ].copy()
-            cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
-            if cell.empty:
-                ax.set_visible(False)
-                continue
-
-            trace_specs = [("full", "black"), ("occlusion", "red")]
-            if include_novel_no_context and condition == "novel":
-                trace_specs.append(("novel_no_context", "blue"))
-
-            for image_type, color in trace_specs:
-                trace = cell.loc[cell["image_type"].eq(image_type)]
-                if trace.empty:
-                    continue
-                ax.plot(trace["step"], trace["y"], color=color, lw=2.0)
-                global_y_bounds.append((float(trace["y"].min()), float(trace["y"].max())))
-
-            stim_interval = stim_windows.get(condition)
-            if stim_interval is not None:
-                ax.axvspan(
-                    stim_interval[0],
-                    stim_interval[1],
-                    ymin=0.02,
-                    ymax=0.055,
-                    color="#8c5a2b",
-                    clip_on=False,
-                    zorder=3,
-                )
-
-            ax.set_xlim(1000, 1350)
-            ax.set_title(f"{condition.title()} | {phase.title()}", fontsize=16, pad=10)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            ax.spines["left"].set_linewidth(1.8)
-            ax.spines["bottom"].set_linewidth(1.8)
-            ax.tick_params(width=1.4, length=4)
-            ax.set_xlabel("Time steps")
-            if idx == 0:
-                ax.set_ylabel("Neural Activity")
-                ax.legend(
-                    handles=legend_handles,
-                    loc="upper left",
-                    frameon=False,
-                    handlelength=2.0,
-                    borderaxespad=0.2,
-                )
-            else:
-                ax.set_ylabel("")
-                ax.tick_params(labelleft=False)
-
-        if global_y_bounds:
-            y_min = min(bound[0] for bound in global_y_bounds)
-            y_max = max(bound[1] for bound in global_y_bounds)
-            span = y_max - y_min
-            if span <= 0:
-                span = max(abs(y_min), abs(y_max), 0.1)
-            pad = 0.08 * span
-            for ax in flat_axes:
-                if ax.get_visible():
-                    ax.set_ylim(y_min - pad, y_max + pad)
+        _plot_panel_a_activity(
+            ax_grid,
+            y_df=y_df,
+            activity_layout=activity_layout,
+            stim_windows=stim_windows,
+            xlim=xlim,
+            include_novel_no_context=include_novel_no_context,
+            image_types=image_types,
+        )
 
     def plot_training_activity(ax_grid, _):
         step_familiar = np.arange(X1.shape[0])
@@ -736,6 +822,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
             ax_grid[0, 0].plot(step_familiar, C1[:, idx], color=c_colors[idx], linestyle='--', lw=1.5, label=f"c_{idx}")
         ax_grid[0, 0].set_title("Training (familiar) input/context (X1, C1)")
         ax_grid[0, 0].set_xlabel("")
+        _style_axis_fonts(ax_grid[0, 0])
         ax_grid[0, 0].tick_params(labelbottom=False)
 
         y_train = training_rows[["step", "y"]].drop_duplicates().groupby("step", as_index=False)["y"].mean()
@@ -757,6 +844,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         # ax_grid[1,0].set_yscale("log")
         ax_grid[1, 0].set_title("Training Y and PV activity")
         ax_grid[1, 0].set_xlabel("Time steps")
+        _style_axis_fonts(ax_grid[1, 0])
 
     def plot_weight_evolution(ax_grid, _):
         wff = (
@@ -822,6 +910,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         ax_grid[3, 0].set_title("Training W_pv evolution")
 
         for i in range(ax_grid.shape[0]):
+            _style_axis_fonts(ax_grid[i, 0])
             # ax_grid[i, 0].set_yscale("log")
             if i < ax_grid.shape[0] - 1:
                 ax_grid[i, 0].set_xlabel("")
@@ -834,11 +923,15 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         builder.set_plotter("D", plot_weight_evolution)
 
     os.makedirs(save_path, exist_ok=True)
-    fig, _ = builder.render(save_path=os.path.join(save_path, f"experiment_results_{name}.png"), show=False)
+    fig, _ = builder.render(save_path=os.path.join(save_path, f"experiment_results_{name}.svg"), show=False)
     plt.close(fig)
 
 
-def visualize_novel_condition_quickplot(long_df: DataFrame, save_path: str = PLOTSDIR, name: str = None) -> None:
+def visualize_novel_condition_quickplot(long_df: DataFrame, save_path: str = PLOTSDIR, name: str = None,
+                                        STIMULI: dict[str, tuple[torch.Tensor, torch.Tensor]] | None = None,
+                                        include_novel_no_context: bool = False,
+                                        xlim: tuple[float, float] = None) -> None:
+    xlim = _resolve_xlim(xlim)
     pre_post_df = long_df.loc[long_df["experiment_phase"].isin(["naive", "expert"])].copy()
     novel_df = pre_post_df.loc[pre_post_df["condition"].eq("novel")].copy()
     if novel_df.empty:
@@ -846,56 +939,33 @@ def visualize_novel_condition_quickplot(long_df: DataFrame, save_path: str = PLO
 
     phases = [p for p in ["naive", "expert"] if p in novel_df["experiment_phase"].unique()]
     image_types = sorted(novel_df["image_type"].dropna().unique().tolist()) if "image_type" in novel_df.columns else []
-    hue_order = _plot_condition_order(image_types)
     y_df = _add_plot_condition_labels(
-        novel_df[["step", "y", "experiment_phase", "image_type"]].drop_duplicates()
+        novel_df[["step", "y", "condition", "experiment_phase", "image_type"]].drop_duplicates()
     )
+    stim_windows = {}
+    if STIMULI is not None and "novel" in STIMULI:
+        stim_windows["novel"] = _find_stimulus_interval_in_window(STIMULI["novel"], step_window=xlim)
 
+    activity_layout = [("novel", phase) for phase in phases]
     fig, axes = plt.subplots(
         1,
         max(1, len(phases)),
-        figsize=(6 * max(1, len(phases)), 4.5),
-        sharey=True,
+        figsize=(6 * max(1, len(phases)), 5.5),
+        squeeze=False,
         constrained_layout=True,
     )
-    axes = np.atleast_1d(axes)
-    fig.suptitle("Novel stimulus responses")
-
-    for idx, phase in enumerate(phases):
-        ax = axes[idx]
-        cell = y_df[y_df["experiment_phase"] == phase]
-        cell = cell.loc[(cell.step > 1000) & (cell.step < 1350)]
-        if cell.empty:
-            ax.set_visible(False)
-            continue
-
-        sns.lineplot(
-            data=cell,
-            x="step",
-            y="y",
-            hue="plot_condition",
-            hue_order=hue_order,
-            style="plot_condition",
-            palette=PLOT_COLORS,
-            errorbar=None,
-            ax=ax,
-            legend=(idx == len(phases) - 1),
-        )
-        ax.set_title("Naive" if phase == "naive" else "Expert")
-        ax.set_xlabel("Time steps")
-        if name and "un_un" in name:
-            ax.set_ylim(0, 0.3)
-        if idx > 0:
-            ax.set_ylabel("")
-            ax.tick_params(labelleft=False)
-
-    axes[0].set_ylabel("Neural Activity")
-    legend = axes[-1].get_legend()
-    if legend is not None:
-        legend.set_title(None)
+    _plot_panel_a_activity(
+        axes,
+        y_df=y_df,
+        activity_layout=activity_layout,
+        stim_windows=stim_windows,
+        xlim=xlim,
+        include_novel_no_context=include_novel_no_context,
+        image_types=image_types,
+    )
 
     os.makedirs(save_path, exist_ok=True)
-    fig.savefig(os.path.join(save_path, f"experiment_results_{name}_novel_only.png"), bbox_inches="tight")
+    fig.savefig(os.path.join(save_path, f"experiment_results_{name}_novel_only.svg"), bbox_inches="tight")
     plt.close(fig)
 
 def wide_to_long(DF:DataFrame) -> DataFrame:

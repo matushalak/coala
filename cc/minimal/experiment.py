@@ -16,7 +16,7 @@ def design_experimental_phase(input_mean:torch.Tensor, input_var:torch.Tensor,
     Example experiment stimulation for using the minimal CCNeuron model.
         Generates random input and context sequences.
     """
-    nzeros = n_steps // 2
+    nzeros = 3 * n_steps // 4
     # Generate random input and context sequences according to provided distributions
     X = randn_reparam(size = (n_steps-nzeros,), mu = input_mean, sigma = input_var)
     C = randn_reparam(size = (n_steps-nzeros,), mu = context_mean, sigma = context_var)
@@ -119,13 +119,14 @@ if __name__ == "__main__":
 
     for cfg_name, cfg in minimal_configs.items():
         print(f"Running experiment for config: {cfg_name}")
-        df, STIMULI = run_experiment(cfg, n_steps_per_phase=300)
+        df, STIMULI = run_experiment(cfg, n_steps_per_phase=400)
         # for now just return the long format dataframe for visualization
         long_df = visualize_experiment_results(
             df,
             STIMULI=STIMULI,
             name=cfg_name,
             include_novel_no_context=include_novel_no_context,
+            xlim = (1000,1400)
         )
         long_dfs_by_transition[cfg_name] = long_df
         if shared_stimuli is None:
