@@ -130,8 +130,8 @@ class COALANet(nn.Module):
                         for i in range(self.n_layers)]
         
         # NOTE: slower time constants deeper in network
-        # time_constants = [0.05, 0.04, 0.03, 0.02]
-        time_constants = [0.05] * self.n_layers # same time constant across network layers
+        time_constants = [0.05, 0.04, 0.03, 0.02]
+        # time_constants = [0.05] * self.n_layers # same time constant across network layers
         
         self.cc_layers = nn.ModuleList()
         src = self.data_dims[1]
@@ -266,7 +266,8 @@ def load_pretrained_weights(
     mode: Literal["discriminative", "generative"] = "discriminative",
 )->COALANet:
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
-    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt"
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt"
+    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt"
     mae_checkpoint = torch.load(mae_checkpoint_path, map_location="cpu", weights_only=False)
     mae_hparams = dict(mae_checkpoint.get("hyper_parameters", {}))
     mae_num_input_channels = int(mae_hparams.get("num_input_channels", 1))
@@ -499,8 +500,6 @@ if __name__ == "__main__":
     # Task and model configuration
     parser.add_argument("--mode",default="generative",choices=("discriminative", "generative"),type=str,
                         help="Which COALANet readout mode to demo.",)
-    parser.add_argument("--masked_fill", default="random", type=str, 
-                        help="Masked pixel fill value or 'random'.")
     
     # Data stream configuration
     parser.add_argument("--num_examples", default=1, type=int, 
@@ -513,6 +512,8 @@ if __name__ == "__main__":
                         help="Distinct masks per sample.")
     parser.add_argument("--timesteps_per_mask", default=1, type=int, 
                         help="How long each mask is reused.")
+    parser.add_argument("--masked_fill", default="random", type=str, 
+                        help="Masked pixel fill value or 'random'.")
     parser.add_argument("--mask_ratio", default=0.5, type=float, 
                         help="Fraction of masked patches.")
     parser.add_argument("--patch_size", default=4, type=int, 

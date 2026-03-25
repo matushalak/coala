@@ -10,11 +10,6 @@ if __package__ in (None, ""):
 
 from cc.ml import MAE_logs
 
-
-def _to_display_range(images):
-    return ((images + 1.0) * 0.5).clamp_(0.0, 1.0)
-
-
 def _load_checkpoint(torch, checkpoint_path: Path) -> dict[str, object]:
     return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
@@ -41,11 +36,11 @@ def _compute_batch_metrics(torch, recon, imgs, keep_mask) -> dict[str, object]:
 
 
 def _build_reconstruction_grid(torch, torchvision, imgs, keep_mask, recon, num_images: int):
-    grey = 0.5
+    grey = 0.0
     num_images = max(1, min(num_images, imgs.shape[0]))
-    original = _to_display_range(imgs[:num_images].float())
-    masked = _to_display_range(torch.where(keep_mask[:num_images], imgs[:num_images], -1.0).float())
-    reconstructed = _to_display_range(recon[:num_images].float())
+    original = imgs[:num_images].float()
+    masked = torch.where(keep_mask[:num_images], imgs[:num_images], grey).float()
+    reconstructed = recon[:num_images].float()
     panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
     return torchvision.utils.make_grid(panel, nrow=num_images, normalize=False, pad_value=grey)
 
@@ -59,9 +54,9 @@ def _save_or_show_grid(grid, *, save_path: str | Path | None, show: bool) -> Non
     if show:
         import matplotlib.pyplot as plt
 
-        grid = grid.detach().cpu().mul(255).add_(0.5).clamp_(0, 255).to(__import__("torch").uint8)
+        # grid = grid.detach().cpu().mul(255).add_(0.5).clamp_(0, 255).to(__import__("torch").uint8)
         fig, ax = plt.subplots(figsize=(12, 6))
-        ax.imshow(grid[0], cmap="gray", interpolation="nearest", vmin=0, vmax=255)
+        ax.imshow(grid[0], cmap="gray", interpolation="nearest", vmin=-1, vmax=1)
         ax.set_title("Original / Masked / Reconstruction")
         ax.axis("off")
         fig.tight_layout()
@@ -78,6 +73,7 @@ def evaluate_pretrained_checkpoint(
     seed: int = 2026,
     num_show_images: int = 8,
     mask_ratio: float | None = None,
+    masked_fill:str|float|None = None,
     patch_size: int | None = None,
     masked_loss_weight: float | None = None,
     decoder_densify_mode: str | None = None,
@@ -150,6 +146,11 @@ def evaluate_pretrained_checkpoint(
             imgs = batch[0].to(device=param_ref.device, dtype=param_ref.dtype)
             actual_keep_mask = model._mask(imgs)
             masked_imgs = imgs * actual_keep_mask.to(dtype=imgs.dtype)
+            if masked_fill is not None:
+                if isinstance(masked_fill, str) and masked_fill == "random":
+                    masked_imgs = torch.where(actual_keep_mask, masked_imgs, torch.rand_like(imgs))
+                else:
+                    masked_imgs = torch.where(actual_keep_mask, masked_imgs, masked_fill.to(device=imgs.device, dtype=imgs.dtype))
             model_keep_mask = actual_keep_mask if give_mask else torch.ones_like(actual_keep_mask)
             recon, _ = model.reconstruct(masked_imgs, keep_mask=model_keep_mask)
             batch_loss = model._reconstruction_loss(recon, imgs, actual_keep_mask)
@@ -200,25 +201,30 @@ def evaluate_pretrained_checkpoint(
 # Command-line interface
 DEFAULT_CHECKPOINT_PATH = (
     # Path(MAE_logs) / "lightning_logs" / "version_13" / "checkpoints" / "epoch=19-step=8440.ckpt"
-    Path(MAE_logs) / "lightning_logs" / "version_14" / "checkpoints" / "epoch=20-step=8862.ckpt"
+    # Path(MAE_logs) / "lightning_logs" / "version_14" / "checkpoints" / "epoch=20-step=8862.ckpt"
+    Path(MAE_logs) / "lightning_logs" / "version_18" / "checkpoints" / "epoch=19-step=8440.ckpt"
 )
 DEFAULT_SAVE_PATH = Path(__file__).with_name("pretrained_reconstructions.png")
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    # Core test params
     parser.add_argument("--checkpoint-path", default=str(DEFAULT_CHECKPOINT_PATH), type=str)
     parser.add_argument("--eval-split", default="test", choices=("train", "val", "test"), type=str)
     parser.add_argument("--batch-size", default=128, type=int)
     parser.add_argument("--num-batches", default=0, type=int, help="0 means evaluate the full split.")
+    # Masking params
+    parser.add_argument("--mask-ratio", default=None, type=float)
+    parser.add_argument("--masked_fill", default="random", type=str, help="Masked pixel fill value or 'random'.")
     parser.add_argument("--give-mask", dest="give_mask", action="store_true")
     parser.add_argument("--no-give-mask", dest="give_mask", action="store_false")
     parser.set_defaults(give_mask=True)
+    parser.add_argument("--patch-size", default=None, type=int)
+    # Other test and model params
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--num-show-images", default=16, type=int)
     parser.add_argument("--save-path", default=str(DEFAULT_SAVE_PATH), type=str)
     parser.add_argument("--show", action="store_true")
-    parser.add_argument("--mask-ratio", default=None, type=float)
-    parser.add_argument("--patch-size", default=None, type=int)
     parser.add_argument("--masked-loss-weight", default=None, type=float)
     parser.add_argument("--num-filters", default=None, type=int)
     parser.add_argument("--num-input-channels", default=None, type=int)

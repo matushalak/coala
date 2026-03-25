@@ -32,6 +32,7 @@ class MAE(pl.LightningModule):
         use_skip: bool = True,
         upconv_method: str = "upsample+conv",
         norm_type: str = "rmsnorm",
+        denoise: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -74,6 +75,10 @@ class MAE(pl.LightningModule):
     ) -> tuple[torch.Tensor, torch.BoolTensor]:
         if keep_mask is None:
             keep_mask = self._mask(imgs)
+        if self.hparams.denoise:
+            imgs = torch.where(keep_mask, 
+                               imgs + (torch.randn_like(imgs) * torch.rand(imgs.shape[0])[:, None, None, None].to(imgs.device, imgs.dtype)), 
+                               imgs).clamp_(-1.0, 1.0)
         recon = self.model(imgs, keep_mask=keep_mask)
         return recon, keep_mask
 
@@ -139,13 +144,15 @@ class ReconstructionCallback(pl.Callback):
         imgs = self._example_batch.to(pl_module.device)
         recon, keep_mask = pl_module.reconstruct(imgs)
 
-        original = _to_display_range(imgs.float())
-        grey = 0.5
-        masked = _to_display_range(torch.where(keep_mask, imgs, -1.0).float())
-        reconstructed = _to_display_range(recon.float())
+        original = imgs.float()
+        grey = 0.0
+        noise = (0.0 if not pl_module.hparams.denoise else (
+            torch.randn_like(imgs) * torch.rand(imgs.shape[0])[:, None, None, None].to(imgs.device, imgs.dtype)).clamp_(-1.0, 1.0))
+        masked = torch.where(keep_mask, imgs + noise, grey).float()
+        reconstructed = recon.float()
 
         panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
-        grid = make_grid(panel, nrow=self.num_images, normalize=False, pad_value=grey)
+        grid = make_grid(panel, nrow=self.num_images, normalize=True, pad_value=grey, value_range=(-1.0, 1.0))
         epoch = trainer.current_epoch
         is_sanity = trainer.sanity_checking
         log_step = epoch + (0 if is_sanity else 1)
@@ -200,6 +207,7 @@ def train_mae(args):
         use_skip=args.no_skip,
         upconv_method=args.upconv_method,
         norm_type=args.norm_type,
+        denoise=args.denoise,
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -218,6 +226,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=42, type=int, help="Seed to use for reproducing results.")
     
     # Masking / data params
+    parser.add_argument("--denoise", action="store_true", 
+                        help="Whether to add noise to the visible pixels (denoising MAE).")
     parser.add_argument("--mask_ratio", default=0.6, type=float, help="Fraction of patches to hide.")
     parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
     parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels in MSE.")

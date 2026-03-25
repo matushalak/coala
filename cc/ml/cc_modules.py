@@ -27,7 +27,7 @@ class LateralInhibition(nn.Module):
         self.n_channels = n_channels
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.conv2d(x, weight=self.weight, padding=self.padding)
+        return F.sigmoid(F.conv2d(x, weight=self.weight, padding=self.padding))
 
 
 class LambdaModule(nn.Module):
@@ -128,7 +128,7 @@ class CCModule(nn.Module):
             self.Lambda_FB = None
         
         self.Lambda_LAT = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
-                                       init_Lambda=0, init_lr=5e-3, plus_one=True,
+                                       init_Lambda=0, init_lr=5e-3, plus_one=False,
                                        learning_rule='hebbian')
 
         # activation function (e.g., ReLU)
@@ -167,7 +167,7 @@ class CCModule(nn.Module):
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
             y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
             drive += self.Lambda_FB(y_FB)
-            # drive /= 2
+            drive /= 2
 
         # if Y_old is not None:
         # y_LAT = self.LAT_conv(drive)
@@ -193,11 +193,10 @@ class CCModule(nn.Module):
         ''''
         Local update, leaks back to 0; average over batch
         '''
-        # self.Lambda_FF.update(Y, y_FF)
-        # self.Lambda_LAT.update(Y, y_LAT)
-        # if self.Lambda_FB is not None:
-        #     self.Lambda_FB.update(Y, y_FB)
-        # pass
+        self.Lambda_FF.update(Y, y_FF)
+        self.Lambda_LAT.update(Y, y_LAT)
+        if self.Lambda_FB is not None:
+            self.Lambda_FB.update(Y, y_FB)
 
     def reset_dynamic_state(self, ref_tensor:torch.Tensor|None = None)->None:
         self.Lambda_FF.reset(ref_tensor=ref_tensor)
