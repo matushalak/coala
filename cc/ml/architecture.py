@@ -5,7 +5,7 @@ import torch.nn as nn
 from typing import Literal
 
 from cc.ml.sparse_cnn_unet import SparseCNNEncoder, SparseCNNDecoder, SparseCNNUNet, SparseLocalStage, DenseLocalStage, DenseUpConv2d, SparseConv2d
-from cc.ml import MAE_logs, Classifier_logs
+from cc.ml import MAE_logs, Classifier_logs, FM_logs
 from cc.ml.utils import load_checkpoint
 from cc.ml.heads.classifier import ClassifierHead
 from cc.ml.cc_modules import CCModule
@@ -133,6 +133,10 @@ class COALANet(nn.Module):
         time_constants = [0.05, 0.04, 0.03, 0.02]
         # time_constants = [0.05] * self.n_layers # same time constant across network layers
         
+        # Lateral inhibition kernel sizes
+        lateral_inhibition_kernels = [(7,7), (5, 5), (3, 3), (1, 1)]
+
+
         self.cc_layers = nn.ModuleList()
         src = self.data_dims[1]
         for il, spatial_dim in enumerate(spatial_dims):
@@ -153,7 +157,9 @@ class COALANet(nn.Module):
             FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local, local_processing0=FB_local0
                                 ) if FB_upconv is not None else None
             # print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
-            layer = CCModule(spatial_dim, FF_conv, FB_conv, time_alpha=time_constants[il])
+            layer = CCModule(spatial_dim, FF_conv, FB_conv, 
+                             time_alpha=time_constants[il], 
+                             LAT_ksize=lateral_inhibition_kernels[il])
             self.cc_layers.append(layer)
             src = dst
         
@@ -265,9 +271,18 @@ class FB_Conv2d(nn.Module):
 def load_pretrained_weights(
     mode: Literal["discriminative", "generative"] = "discriminative",
 )->COALANet:
+    # MAE models
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt"
-    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt"
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt" # improved MAE
+    
+    # dMAE models
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM" dMAE pretraining, also good
+    
+    # FM models
+    mae_checkpoint_path = f"{FM_logs}/lightning_logs/version_1/checkpoints/epoch=18-step=16036.ckpt" # FM model, pretrained for 21 epochs
+    
     mae_checkpoint = torch.load(mae_checkpoint_path, map_location="cpu", weights_only=False)
     mae_hparams = dict(mae_checkpoint.get("hyper_parameters", {}))
     mae_num_input_channels = int(mae_hparams.get("num_input_channels", 1))
@@ -446,6 +461,7 @@ def create_temporal_reconstruction_figure(
 
 
 def create_temporal_reconstruction_grid(
+    target_images: torch.Tensor,
     masked_images: torch.Tensor,
     reconstructions: list[torch.Tensor] | torch.Tensor,
     num_examples: int = 4,
@@ -455,6 +471,7 @@ def create_temporal_reconstruction_grid(
 
     reconstructions = _to_display_range(stack_temporal_reconstructions(reconstructions).detach().cpu())
     masked_images = _to_display_range(masked_images[:num_examples].detach().cpu())
+    target_images = _to_display_range(target_images[:num_examples].detach().cpu())
     reconstructions = reconstructions[:num_examples]
 
     if masked_images.shape[:2] != reconstructions.shape[:2]:
@@ -468,7 +485,8 @@ def create_temporal_reconstruction_grid(
     time_idx = torch.linspace(0, total_t - 1, steps=num_time_steps).round().long()
     masked_panel = masked_images[:, time_idx]
     recon_panel = reconstructions[:, time_idx]
-    panel = torch.stack((masked_panel, recon_panel), dim=1).reshape(-1, *masked_images.shape[2:])
+    target_panel = target_images[:, time_idx].unsqueeze(2)
+    panel = torch.stack((masked_panel, recon_panel, target_panel), dim=1).reshape(-1, *masked_images.shape[2:])
     return make_grid(panel, nrow=num_time_steps, normalize=False, pad_value=0.5)
 
 def _show_image_grid(grid: torch.Tensor, title: str) -> None:
@@ -514,13 +532,13 @@ if __name__ == "__main__":
                         help="How long each mask is reused.")
     parser.add_argument("--masked_fill", default="random", type=str, 
                         help="Masked pixel fill value or 'random'.")
-    parser.add_argument("--mask_ratio", default=0.5, type=float, 
+    parser.add_argument("--mask_ratio", default=0.6, type=float, 
                         help="Fraction of masked patches.")
     parser.add_argument("--patch_size", default=4, type=int, 
                         help="Size of each patch.")
     
     # Visualization configuration
-    parser.add_argument("--max_time_steps", default=50, type=int, 
+    parser.add_argument("--max_time_steps", default=100, type=int, 
                         help="Max timesteps shown in reconstruction grids.")
     parser.add_argument("--hide_input_grid", action="store_true", 
                         help="Skip showing the masked input sequence grid.")
@@ -536,7 +554,7 @@ if __name__ == "__main__":
     coalanet = load_pretrained_weights(mode=args.mode)
     examples, targets = visualize_msmnist_examples(
         num_examples=args.num_examples,
-        number_of_masks=args.number_of_masks,
+        number_of_masks=args.number_of_masks//2,
         timesteps_per_mask=args.timesteps_per_mask,
         mask_ratio=args.mask_ratio,
         masked_fill=_parse_masked_fill_arg(args.masked_fill),
@@ -559,7 +577,9 @@ if __name__ == "__main__":
     )
 
     examples = torch.cat((examples, examples2), dim=1)
-    targets = torch.cat((targets, targets2), dim=1).repeat_interleave(args.number_of_masks * args.timesteps_per_mask, dim=1)
+    targets = torch.cat((targets.repeat_interleave(args.number_of_masks//2 * args.timesteps_per_mask, dim=1),
+                         targets2.repeat_interleave(args.number_of_masks * args.timesteps_per_mask, dim=1)),
+                         dim=1)
 
     with torch.no_grad():
         model_result = coalanet(examples, return_activation_maps=not args.hide_activation_maps)
@@ -579,12 +599,13 @@ if __name__ == "__main__":
         reconstructions = stack_temporal_reconstructions(outputs)
         fig = create_temporal_reconstruction_figure(reconstructions, targets)
         grid = create_temporal_reconstruction_grid(
+            targets,
             examples,
             reconstructions,
             num_examples=args.num_examples,
             max_time_steps=args.max_time_steps,
         )
-        _show_image_grid(grid, title="Masked inputs (top) and reconstructions (bottom)")
+        _show_image_grid(grid, title="Masked inputs (top); reconstructions (middle); and unmasked targets (bottom)")
 
     if activation_maps is not None:
         if not (0 <= args.activation_map_sample_idx < examples.shape[0]):

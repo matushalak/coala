@@ -442,7 +442,8 @@ class SparseCNNDecoder(nn.Module):
 
         # Predict output (retina)        
         self.up28_to_out = nn.Sequential(nn.Conv2d(c28, num_output_channels, kernel_size=3, padding=1, stride=1),
-                                         nn.Hardtanh(-1, 1))
+                                         nn.Hardtanh(-1, 1)
+                                         )
 
     def set_densify_mode(self, mode: str) -> None:
         if mode not in self.DENSIFY_MODES:
@@ -455,8 +456,8 @@ class SparseCNNDecoder(nn.Module):
         if self.densify_mode == "zero":
             return torch.zeros_like(feat)
         if self.densify_mode == "random":
-            # Zero-mean Gaussian feature noise with moderate scale.
-            return 0.5 * torch.randn_like(feat) # most samples between -1 and 1
+            # Zero-mean Gaussian feature noise.
+            return torch.randn_like(feat)
         raise RuntimeError(f"Unsupported densify_mode: {self.densify_mode}")
 
     def _densify(self, feat: torch.Tensor, keep_mask: torch.BoolTensor, mask_token: torch.Tensor) -> torch.Tensor:

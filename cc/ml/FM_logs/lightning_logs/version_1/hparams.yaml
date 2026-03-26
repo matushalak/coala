@@ -1,11 +1,11 @@
 decoder_densify_mode: random
-denoise: true
 lr: 0.001
 mask_ratio: 0.6
-masked_loss_weight: 4.0
+masked_loss_weight: 1.0
 norm_type: rmsnorm
 num_filters: 32
 num_input_channels: 1
 patch_size: 4
+step_size: 0.1
 upconv_method: upsample+conv
 use_skip: true

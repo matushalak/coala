@@ -27,7 +27,7 @@ class LateralInhibition(nn.Module):
         self.n_channels = n_channels
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.sigmoid(F.conv2d(x, weight=self.weight, padding=self.padding))
+        return F.relu(F.conv2d(x, weight=self.weight, padding=self.padding))
 
 
 class LambdaModule(nn.Module):
@@ -115,35 +115,21 @@ class CCModule(nn.Module):
         # Define dynamic lambdas for individual synapses (3-compartment neuron)
         self.Lambda_FF = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
                                       init_Lambda=0.0, init_lr=5e-3, plus_one=True,
-                                      learning_rule='anti_hebbian'
-                                    #   learning_rule='hebbian'
-                                      )
+                                      learning_rule='anti_hebbian')
         
-        if FB_conv is not None:
-            self.Lambda_FB = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
-                                          init_Lambda=0.0, init_lr=5e-3, plus_one=True,
-                                          learning_rule='dampened_hebbian'
-                                          )
-        else:
-            self.Lambda_FB = None
+        self.Lambda_FB = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
+                                      init_Lambda=0.0, init_lr=5e-3, plus_one=True,
+                                      learning_rule='dampened_hebbian')
         
         self.Lambda_LAT = LambdaModule(FF_conv.out_channels, spatial_dims, learnable=True, 
-                                       init_Lambda=0, init_lr=5e-3, plus_one=False,
+                                       init_Lambda=0, init_lr=5e-3, plus_one=True,
                                        learning_rule='hebbian')
 
         # activation function (e.g., ReLU)
         self.activation_fn = activation_fn
-        self.sigmoid = nn.Sigmoid()
 
-        # (dt/tau) time alpha for neurons (TODO: this should probably be fine-tuned or learned with backprop per task)
-        if time_alpha is None:
-            time_alpha = 0.2
+        # (dt/tau) time alpha for neurons in current layer
         self.time_alpha = nn.Parameter(torch.as_tensor(time_alpha), requires_grad=False)
-        
-        # TODO: parameters to learn with backprop learning
-        # time alphas for each of the lambdas
-
-        # LRs for each of the lambda local learning rules
 
         # keep mask
         self.register_buffer("keep_mask", torch.ones(1, 1, *spatial_dims, dtype=torch.bool), persistent=False)
@@ -154,6 +140,7 @@ class CCModule(nn.Module):
         ref = x if x is not None else (Y_old if Y_old is not None else context)
         assert ref is not None, "CCModule.forward needs at least one of x, context, or Y_old to infer batch/device."
 
+        # Pyramidal cells
         if x is not None:
             y_FF = self.FF_conv(x, self.keep_mask)
         else:
@@ -161,22 +148,22 @@ class CCModule(nn.Module):
         y_FB = torch.zeros_like(y_FF)
         y_LAT = torch.zeros_like(y_FF)
         
-        # Combine contributions with dynamic lambdas
-        drive = self.Lambda_FF(y_FF)
-
+        # HVA cells
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
             y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
-            drive += self.Lambda_FB(y_FB)
-            drive /= 2
 
-        # if Y_old is not None:
-        # y_LAT = self.LAT_conv(drive)
-        # drive -=  self.Lambda_LAT(y_LAT) # "PV cells"
+        # "PV cells"
+        if Y_old is not None: 
+            y_LAT = self.LAT_conv(y_FF)
         
+        # Dynamically combine input streams
         # Prediction error?
-        # drive -= (y_FB - y_FF)
+        # drive = y_FF - y_FB
         
-        # Apply activation function (drive term)
+        # Summation
+        drive = self.Lambda_FF(y_FF) + self.Lambda_FB(y_FB) #- self.Lambda_LAT(y_LAT)
+
+        # Apply activation function (drive term) - identity for now
         drive = self.activation_fn(drive)
 
         # Evolution of Y
@@ -187,16 +174,17 @@ class CCModule(nn.Module):
         
         return Y, y_FF, y_FB, y_LAT # return all drives for local update
     
+    # NOTE: current update rules do NOT work
     @torch.no_grad()
     def update(self, Y:torch.Tensor, 
                y_FF:torch.Tensor, y_FB:torch.Tensor, y_LAT:torch.Tensor)->None:
         ''''
         Local update, leaks back to 0; average over batch
         '''
-        self.Lambda_FF.update(Y, y_FF)
-        self.Lambda_LAT.update(Y, y_LAT)
-        if self.Lambda_FB is not None:
-            self.Lambda_FB.update(Y, y_FB)
+        # self.Lambda_FF.update(Y, y_FF)
+        # self.Lambda_LAT.update(Y, y_LAT)
+        # if self.Lambda_FB is not None:
+        #     self.Lambda_FB.update(Y, y_FB)
 
     def reset_dynamic_state(self, ref_tensor:torch.Tensor|None = None)->None:
         self.Lambda_FF.reset(ref_tensor=ref_tensor)
