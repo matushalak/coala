@@ -16,6 +16,7 @@ def msmnist(
     mask_ratio: float = 0.5,
     mask_pattern: str = "random",
     masked_fill: str | float = 0.0,
+    visible_corrupt:bool = False,
     number_of_masks: int = 100,
     timesteps_per_mask: int = 1,
     accepted_digits: list[int] | None = None,
@@ -82,6 +83,7 @@ def msmnist(
         timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
         masked_fill=masked_fill,
+        visible_corrupt=visible_corrupt,
         target_type=target_type,
     )
     val_dataset = MaskedSequentialDataset(
@@ -92,6 +94,7 @@ def msmnist(
         timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
         masked_fill=masked_fill,
+        visible_corrupt=visible_corrupt,
         target_type=target_type,
     )
     test_dataset = MaskedSequentialDataset(
@@ -102,6 +105,7 @@ def msmnist(
         timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
         masked_fill=masked_fill,
+        visible_corrupt=visible_corrupt,
         target_type=target_type,
     )
 
@@ -135,6 +139,7 @@ def visualize_msmnist_examples(
     num_examples: int = 4,
     mask_ratio: float = 0.5,
     masked_fill: str | float = 0.0,
+    visible_corrupt: bool = False,
     patch_size:int = 4,
     number_of_masks: int = 100,
     timesteps_per_mask: int = 1,
@@ -148,6 +153,7 @@ def visualize_msmnist_examples(
         num_workers=0,
         mask_ratio=mask_ratio,
         masked_fill=masked_fill,
+        visible_corrupt=visible_corrupt,
         number_of_masks=number_of_masks,
         timesteps_per_mask=timesteps_per_mask,
         patch_size=patch_size,

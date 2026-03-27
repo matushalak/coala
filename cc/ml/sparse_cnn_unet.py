@@ -426,17 +426,14 @@ class SparseCNNDecoder(nn.Module):
         self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=False, kernel_size=3, norm_type=norm_type)
         
         # V3
-        # self.up4_to_7 = nn.ConvTranspose2d(c4, c7, kernel_size=3, output_padding=0, padding=1, stride=2)
         self.up4_to_7 = DenseUpConv2d(c4, c7, kernel_size=3, padding=1, stride=2, output_padding=0, method=conv_method)
         self.local7 = DenseLocalStage(c7, spatial_dim=(7, 7), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # V2
-        # self.up7_to_14 = nn.ConvTranspose2d(c7, c14, kernel_size=3, output_padding=1, padding=1, stride=2)
         self.up7_to_14 = DenseUpConv2d(c7, c14, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
         self.local14 = DenseLocalStage(c14, spatial_dim=(14, 14), use_residual=True, kernel_size=3, norm_type=norm_type)
 
         # V1
-        # self.up14_to_28 = nn.ConvTranspose2d(c14,c28,kernel_size=3,output_padding=1,padding=1,stride=2,)
         self.up14_to_28 = DenseUpConv2d(c14, c28, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
         self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=3, norm_type=norm_type)
 
@@ -486,7 +483,7 @@ class SparseCNNDecoder(nn.Module):
             x = x + dense28_skip
         x = self.local28(x)
         x = self.up28_to_out(x)
-        return x
+        return x#, {'feat28': x, 'feat14': x, 'feat7': x, 'feat4': x}
 
     @property
     def device(self):

@@ -8,7 +8,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[3]))
 
-from cc.ml import MAE_logs
+from cc.ml import MAE_logs, FM_logs
 
 def _load_checkpoint(torch, checkpoint_path: Path) -> dict[str, object]:
     return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -35,11 +35,11 @@ def _compute_batch_metrics(torch, recon, imgs, keep_mask) -> dict[str, object]:
     }
 
 
-def _build_reconstruction_grid(torch, torchvision, imgs, keep_mask, recon, num_images: int):
+def _build_reconstruction_grid(torch, torchvision, imgs, masked_imgs, recon, num_images: int):
     grey = 0.0
     num_images = max(1, min(num_images, imgs.shape[0]))
     original = imgs[:num_images].float()
-    masked = torch.where(keep_mask[:num_images], imgs[:num_images], grey).float()
+    masked = masked_imgs[:num_images].float()
     reconstructed = recon[:num_images].float()
     panel = torch.cat([original, masked, reconstructed], dim=0).detach().cpu()
     return torchvision.utils.make_grid(panel, nrow=num_images, normalize=False, pad_value=grey)
@@ -74,6 +74,7 @@ def evaluate_pretrained_checkpoint(
     num_show_images: int = 8,
     mask_ratio: float | None = None,
     masked_fill:str|float|None = None,
+    visible_corrupt: bool = False,
     patch_size: int | None = None,
     masked_loss_weight: float | None = None,
     decoder_densify_mode: str | None = None,
@@ -146,11 +147,17 @@ def evaluate_pretrained_checkpoint(
             imgs = batch[0].to(device=param_ref.device, dtype=param_ref.dtype)
             actual_keep_mask = model._mask(imgs)
             masked_imgs = imgs * actual_keep_mask.to(dtype=imgs.dtype)
+            noise = torch.randn_like(imgs)
             if masked_fill is not None:
                 if isinstance(masked_fill, str) and masked_fill == "random":
-                    masked_imgs = torch.where(actual_keep_mask, masked_imgs, torch.rand_like(imgs))
+                    masked_imgs = torch.where(actual_keep_mask, 
+                                              masked_imgs + noise if visible_corrupt else masked_imgs, 
+                                              noise)
                 else:
-                    masked_imgs = torch.where(actual_keep_mask, masked_imgs, masked_fill.to(device=imgs.device, dtype=imgs.dtype))
+                    masked_imgs = torch.where(actual_keep_mask, 
+                                              masked_imgs + noise if visible_corrupt else masked_imgs, 
+                                              masked_fill.to(device=imgs.device, dtype=imgs.dtype))
+
             model_keep_mask = actual_keep_mask if give_mask else torch.ones_like(actual_keep_mask)
             recon, _ = model.reconstruct(masked_imgs, keep_mask=model_keep_mask)
             batch_loss = model._reconstruction_loss(recon, imgs, actual_keep_mask)
@@ -186,7 +193,7 @@ def evaluate_pretrained_checkpoint(
             torch,
             torchvision,
             imgs0,
-            keep_mask0,
+            masked_imgs,
             recon0,
             num_images=num_show_images,
         ),
@@ -200,9 +207,17 @@ def evaluate_pretrained_checkpoint(
 
 # Command-line interface
 DEFAULT_CHECKPOINT_PATH = (
-    # Path(MAE_logs) / "lightning_logs" / "version_13" / "checkpoints" / "epoch=19-step=8440.ckpt"
-    # Path(MAE_logs) / "lightning_logs" / "version_14" / "checkpoints" / "epoch=20-step=8862.ckpt"
-    Path(MAE_logs) / "lightning_logs" / "version_18" / "checkpoints" / "epoch=19-step=8440.ckpt"
+    # MAE models
+    # f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
+    # f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt" # improved MAE
+    
+    # dMAE models
+    # f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE
+    f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
+    # f"{MAE_logs}/lightning_logs/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM"-type noise dMAE pretraining, also good
+    
+    # FM models
+    # f"{FM_logs}/lightning_logs/version_1/checkpoints/epoch=18-step=16036.ckpt" # FM model, pretrained for 21 epochs
 )
 DEFAULT_SAVE_PATH = Path(__file__).with_name("pretrained_reconstructions.png")
 
@@ -213,13 +228,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-split", default="test", choices=("train", "val", "test"), type=str)
     parser.add_argument("--batch-size", default=128, type=int)
     parser.add_argument("--num-batches", default=0, type=int, help="0 means evaluate the full split.")
+    
     # Masking params
     parser.add_argument("--mask-ratio", default=None, type=float)
     parser.add_argument("--masked_fill", default="random", type=str, help="Masked pixel fill value or 'random'.")
+    parser.add_argument("--visible_corrupt", action='store_true', help="Whether to corrupt visible pixels.")
     parser.add_argument("--give-mask", dest="give_mask", action="store_true")
     parser.add_argument("--no-give-mask", dest="give_mask", action="store_false")
     parser.set_defaults(give_mask=True)
     parser.add_argument("--patch-size", default=None, type=int)
+    
     # Other test and model params
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--num-show-images", default=16, type=int)
@@ -248,6 +266,8 @@ if __name__ == "__main__":
         num_show_images=args.num_show_images,
         mask_ratio=args.mask_ratio,
         patch_size=args.patch_size,
+        masked_fill=args.masked_fill,
+        visible_corrupt=args.visible_corrupt,
         masked_loss_weight=args.masked_loss_weight,
         decoder_densify_mode=args.decoder_densify_mode,
         upconv_method=args.upconv_method,

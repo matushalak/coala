@@ -31,6 +31,7 @@ class MaskedSequentialDataset(data.Dataset):
         timesteps_per_mask: int = 1,
         mask_pattern: str = "random",
         masked_fill: str | float = 0.0,
+        visible_corrupt: bool = False,
         target_type: str = "label",
     ):
         super().__init__()
@@ -66,6 +67,7 @@ class MaskedSequentialDataset(data.Dataset):
         self.num_timeframes = number_of_masks * timesteps_per_mask
         self.mask_pattern = mask_pattern
         self.target_type = target_type
+        self.visible_corrupt = visible_corrupt
 
         sample_img, _ = self.dataset[0]
         if sample_img.dim() != 3:
@@ -138,7 +140,9 @@ class MaskedSequentialDataset(data.Dataset):
         if self.masked_fill_mode == "random":
             img_t = img_t.expand(self.num_timeframes, -1, -1, -1)
             noise = (1 * torch.randn_like(img_t)).clamp_(-1.0, 1.0)
-            masked_imgs = torch.where(keep, img_t+noise, noise)
+            masked_imgs = torch.where(keep, 
+                                      img_t+noise if self.visible_corrupt else img_t, 
+                                      noise)
         elif self.masked_fill_value == 0.0:
             masked_imgs = img_t * keep.to(dtype=img.dtype)
         else:

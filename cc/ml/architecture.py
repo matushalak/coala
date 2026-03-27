@@ -277,11 +277,11 @@ def load_pretrained_weights(
     
     # dMAE models
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
+    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM" dMAE pretraining, also good
     
     # FM models
-    mae_checkpoint_path = f"{FM_logs}/lightning_logs/version_1/checkpoints/epoch=18-step=16036.ckpt" # FM model, pretrained for 21 epochs
+    # mae_checkpoint_path = f"{FM_logs}/lightning_logs/version_1/checkpoints/epoch=18-step=16036.ckpt" # FM model, pretrained for 21 epochs
     
     mae_checkpoint = torch.load(mae_checkpoint_path, map_location="cpu", weights_only=False)
     mae_hparams = dict(mae_checkpoint.get("hyper_parameters", {}))
@@ -536,7 +536,9 @@ if __name__ == "__main__":
                         help="Fraction of masked patches.")
     parser.add_argument("--patch_size", default=4, type=int, 
                         help="Size of each patch.")
-    
+    parser.add_argument("--visible_corrupt", action='store_true', 
+                        help="Whether to corrupt visible pixels.")
+
     # Visualization configuration
     parser.add_argument("--max_time_steps", default=100, type=int, 
                         help="Max timesteps shown in reconstruction grids.")
@@ -558,6 +560,7 @@ if __name__ == "__main__":
         timesteps_per_mask=args.timesteps_per_mask,
         mask_ratio=args.mask_ratio,
         masked_fill=_parse_masked_fill_arg(args.masked_fill),
+        visible_corrupt=args.visible_corrupt,
         accepted_digits=args.accepted_digits,
         target_type=target_type,
         show=not args.hide_input_grid,
@@ -570,6 +573,7 @@ if __name__ == "__main__":
         timesteps_per_mask=args.timesteps_per_mask,
         mask_ratio=args.mask_ratio,
         masked_fill=_parse_masked_fill_arg(args.masked_fill),
+        visible_corrupt=args.visible_corrupt,
         accepted_digits=args.accepted_digits,
         target_type=target_type,
         show=not args.hide_input_grid,
