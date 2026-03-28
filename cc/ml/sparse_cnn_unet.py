@@ -78,7 +78,7 @@ class GlobalResponseNorm(nn.Module):
             mask = keep_mask.to(dtype=x.dtype)
 
         # L2 norm "pooling" across spatial dimensions.
-        gx = torch.sqrt((x.pow(2) * mask).sum(dim=[2, 3], keepdim=True))
+        gx = torch.sqrt((x.pow(2) * mask).sum(dim=[2, 3], keepdim=True)+self.eps)
         # Competition across channels.
         nx = gx / (gx.mean(dim=1, keepdim=True) + self.eps)
         # Apply scaling and bias
@@ -352,7 +352,7 @@ class SparseCNNEncoder(nn.Module):
 
         # V4
         self.down7_to_4 = SparseConv2d(2 * num_filters, 4 * num_filters, kernel_size=3, padding=1, stride=2)
-        self.local4 = SparseLocalStage(4 * num_filters, spatial_dim=(4, 4), use_residual=False, kernel_size=3, norm_type=norm_type)
+        self.local4 = SparseLocalStage(4 * num_filters, spatial_dim=(4, 4), use_residual=True, kernel_size=3, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> dict[str, torch.Tensor]:
         x = x.float()
@@ -423,7 +423,7 @@ class SparseCNNDecoder(nn.Module):
         nn.init.normal_(self.mask_token4, mean=0.0, std=0.02)
 
         # V4
-        self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=False, kernel_size=3, norm_type=norm_type)
+        self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=True, kernel_size=3, norm_type=norm_type)
         
         # V3
         self.up4_to_7 = DenseUpConv2d(c4, c7, kernel_size=3, padding=1, stride=2, output_padding=0, method=conv_method)
@@ -463,27 +463,27 @@ class SparseCNNDecoder(nn.Module):
 
     def forward(self, enc_out: dict[str, torch.Tensor]) -> torch.Tensor:
         dense4 = self._densify(enc_out["feat4"], enc_out["mask4"], self.mask_token4)
-        x = self.local4(dense4)
-        x = self.up4_to_7(x)
+        x4 = self.local4(dense4)
+        x7 = self.up4_to_7(x4)
         
         if self.use_skip:
             dense7_skip = self._densify(enc_out["feat7"], enc_out["mask7"], self.mask_token7)
-            x = x + dense7_skip
-        x = self.local7(x)
-        x = self.up7_to_14(x)
+            x7 = x7 + dense7_skip
+        x7 = self.local7(x7)
+        x14 = self.up7_to_14(x7)
         
         if self.use_skip:
             dense14_skip = self._densify(enc_out["feat14"], enc_out["mask14"], self.mask_token14)
-            x = x + dense14_skip
-        x = self.local14(x)
-        x = self.up14_to_28(x)
+            x14 = x14 + dense14_skip
+        x14 = self.local14(x14)
+        x28 = self.up14_to_28(x14)
         
         if self.use_skip:
             dense28_skip = self._densify(enc_out["feat28"], enc_out["mask28"], self.mask_token28)
-            x = x + dense28_skip
-        x = self.local28(x)
-        x = self.up28_to_out(x)
-        return x#, {'feat28': x, 'feat14': x, 'feat7': x, 'feat4': x}
+            x28 = x28 + dense28_skip
+        x28 = self.local28(x28)
+        x = self.up28_to_out(x28)
+        return x, {'feat28': x28, 'feat14': x14, 'feat7': x7, 'feat4': x4}
 
     @property
     def device(self):
@@ -516,8 +516,10 @@ class SparseCNNUNet(nn.Module):
             )
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
-        enc_out = self.encoder(x, keep_mask=keep_mask)
-        return self.decoder(enc_out)
+        enc_features = self.encoder(x, keep_mask=keep_mask)
+        image, dec_features = self.decoder(enc_features)
+        return image
+
 
     def set_decoder_densify_mode(self, mode: str) -> None:
         self.decoder.set_densify_mode(mode)

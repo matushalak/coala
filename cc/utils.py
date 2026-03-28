@@ -1,6 +1,7 @@
 # author: Matúš Halák (@matushalak)
 from typing import Iterable
 import torch
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 class EMA(torch.nn.Module):
     '''
@@ -29,6 +30,53 @@ class EMA(torch.nn.Module):
     
     def reset_state(self):
         self.ema = self.baseline.clone()
+
+
+class ExponentialMovingAverage(torch.nn.Module):
+    """
+    Wrapper around torch.optim.swa_utils.AveragedModel for model-weight EMA.
+    Weights are frozen and not part of the student computation graph during backprop.
+    """
+
+    def __init__(self, model: torch.nn.Module, decay: float = 0.99, use_buffers: bool = True):
+        super().__init__()
+        if not (0.0 < decay < 1.0):
+            raise ValueError(f"decay must be in (0, 1), got {decay}")
+
+        self.decay = decay
+        self.ema_model = AveragedModel(
+            model,
+            multi_avg_fn=get_ema_multi_avg_fn(decay),
+            use_buffers=use_buffers,
+        )
+        self._freeze()
+
+    def _freeze(self):
+        self.training = False
+        self.ema_model.eval()
+        for param in self.ema_model.parameters():
+            param.requires_grad_(False)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.training = False
+        self.ema_model.eval()
+        return self
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module):
+        """Call once after each optimizer step."""
+        self.ema_model.update_parameters(model)
+
+    @torch.no_grad()
+    def forward(self, *args, **kwargs):
+        return self.ema_model(*args, **kwargs)
+
+    def state_dict(self, *args, **kwargs):
+        return self.ema_model.state_dict(*args, **kwargs)
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        return self.ema_model.load_state_dict(state_dict, strict=strict)
 
 
 class ThresholdReLU(torch.nn.Module):
