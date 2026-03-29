@@ -3,9 +3,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from typing import Literal
+import re
+import warnings
 
 from cc.ml.sparse_cnn_unet import SparseCNNEncoder, SparseCNNDecoder, SparseCNNUNet, SparseLocalStage, DenseLocalStage, DenseUpConv2d, SparseConv2d
-from cc.ml import MAE_logs, Classifier_logs, FM_logs
+from cc.ml import MAE_logs, Classifier_logs, FM_logs, LeJEPA_logs
 from cc.ml.utils import load_checkpoint
 from cc.ml.heads.classifier import ClassifierHead
 from cc.ml.cc_modules import CCModule
@@ -120,48 +122,62 @@ class COALANet(nn.Module):
         self.head = self.discriminative_head if mode == "discriminative" else self.generative_head
 
     def _define_hierarchical_layers(self)->None:
-        self.n_layers = len(self.ff_local_processing) # number of hierarchical layers based on the feedforward local processing stages
+        ff_local_items = self._ordered_local_stages(self.ff_local_processing)
+        ff_conv_items = self._ordered_transition_modules(self.ff_downsample_convs)
+        fb_local_items = self._ordered_local_stages(self.fb_local_processing)
+        fb_upconv_items = self._ordered_transition_modules(self.fb_upsample_convs)
+
+        self.n_layers = len(ff_local_items) # number of hierarchical layers based on the feedforward local processing stages
         assert self.n_layers == len(self.fb_local_processing), "Mismatch in number of feedforward and feedback local processing stages."
         assert self.n_layers == len(self.ff_downsample_convs) == len(self.fb_upsample_convs) + 1, "There should be one more set of FF weights (input->V1) than FB weights."
-        # NOTE: assume halving in spatial dimensions and doubling channel dimensions each layer (V1 starts at data resolution)
-        spatial_dims = [(self.data_dims[1] // (2 ** i), self.data_dims[2] // (2 ** i)) 
-                        if self.data_dims[1] % (2 ** i) == 0 and self.data_dims[2] % (2 ** i) == 0 
-                        else ((self.data_dims[1] // (2 ** i))+1, (self.data_dims[2] // (2 ** i))+1)
-                        for i in range(self.n_layers)]
+        spatial_dims = [self._infer_stage_spatial_dim(stage) for _, stage in ff_local_items]
         
         # NOTE: slower time constants deeper in network
-        time_constants = [0.05, 0.04, 0.03, 0.02]
+        time_constants = [0.05, 0.04, 0.03, 0.02][: self.n_layers]
         # time_constants = [0.05] * self.n_layers # same time constant across network layers
         
         # Lateral inhibition kernel sizes
-        lateral_inhibition_kernels = [(7,7), (5, 5), (3, 3), (1, 1)]
+        lateral_inhibition_kernels = [(7,7), (5, 5), (3, 3), (1, 1)][: self.n_layers]
 
 
         self.cc_layers = nn.ModuleList()
-        src = self.data_dims[1]
         for il, spatial_dim in enumerate(spatial_dims):
-            dst = spatial_dim[0]
             # Bottom-up FF input from layer below
-            FF_conv = self.ff_downsample_convs.get(f"down{src}_to_{dst}", None)
-            FF_local = self.ff_local_processing.get(f"local{dst}", None)
-            assert FF_conv is not None and FF_local is not None, f"Missing FF conv or local processing for down{src}_to_{dst} and local{dst}"
+            _, FF_conv = ff_conv_items[il]
+            _, FF_local = ff_local_items[il]
             FF_conv = FF_Conv2d(conv=FF_conv, local_processing=FF_local)
             # Top-down FB context from layer above (if exists). Top layer has no feedback source.
-            if il < self.n_layers - 1:
-                next_dim = spatial_dims[il + 1][0]
-            else:
-                next_dim = None
-            FB_local0 = self.fb_local_processing.get(f"local{next_dim}", None) if il == len(spatial_dims)-2 else None
-            FB_local = self.fb_local_processing.get(f"local{dst}", None)
-            FB_upconv = self.fb_upsample_convs.get(f"up{next_dim}_to_{dst}", None)
-            FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local, local_processing0=FB_local0
-                                ) if FB_upconv is not None else None
-            # print(f"Defining CC layer with FF_conv: {FF_conv}, FB_conv: {FB_conv}")
+            _, FB_local = fb_local_items[il]
+            FB_upconv = fb_upconv_items[il][1] if il < len(fb_upconv_items) else None
+            FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local)
             layer = CCModule(spatial_dim, FF_conv, FB_conv, 
                              time_alpha=time_constants[il], 
                              LAT_ksize=lateral_inhibition_kernels[il])
             self.cc_layers.append(layer)
-            src = dst
+
+    @staticmethod
+    def _infer_stage_spatial_dim(stage: SparseLocalStage | DenseLocalStage) -> tuple[int, int]:
+        normalized_shape = tuple(stage.pre_norm.norm.normalized_shape)
+        return int(normalized_shape[-2]), int(normalized_shape[-1])
+
+    @staticmethod
+    def _stage_numeric_suffix(name: str) -> int:
+        match = re.search(r"(\d+)$", name)
+        if match is None:
+            raise ValueError(f"Could not parse numeric suffix from stage name {name!r}.")
+        return int(match.group(1))
+
+    def _ordered_local_stages(
+        self,
+        stages: dict[str, SparseLocalStage | DenseLocalStage],
+    ) -> list[tuple[str, SparseLocalStage | DenseLocalStage]]:
+        return sorted(stages.items(), key=lambda item: self._stage_numeric_suffix(item[0]), reverse=True)
+
+    def _ordered_transition_modules(
+        self,
+        modules: dict[str, nn.Module],
+    ) -> list[tuple[str, nn.Module]]:
+        return sorted(modules.items(), key=lambda item: self._stage_numeric_suffix(item[0]), reverse=True)
         
     def _load_pretrained(self, encoder:SparseCNNEncoder, decoder:SparseCNNDecoder, head:nn.Module | None,
                          freeze_encoder:bool = True, freeze_decoder:bool = True, freeze_head:bool = True)->None:
@@ -233,7 +249,8 @@ class COALANet(nn.Module):
 
 class FF_Conv2d(nn.Module):
     ''''
-    Downsampling convolution + local processing
+    Downsampling convolution + local processing 
+    (C + L ->)
     '''
     def __init__(self, conv:SparseConv2d, local_processing:SparseLocalStage):
         super(FF_Conv2d, self).__init__()
@@ -249,19 +266,19 @@ class FF_Conv2d(nn.Module):
 class FB_Conv2d(nn.Module):
     '''
     Upsampling convolution + local processing (w optional skip connection)
+    (<- L + C)
     '''
-    def __init__(self, upconv:nn.ConvTranspose2d|DenseUpConv2d, local_processing:DenseLocalStage, 
-                 local_processing0:DenseLocalStage|None = None):
+    def __init__(self, 
+                 upconv:nn.ConvTranspose2d|DenseUpConv2d|None, 
+                 local_processing:DenseLocalStage):
         super(FB_Conv2d, self).__init__()
         self.upconv = upconv
         self.local_processing = local_processing
-        self.local_processing0 = local_processing0
-        self.out_channels = upconv.out_channels
+        self.out_channels = upconv.out_channels if upconv is not None else local_processing.n_channels
 
     def forward(self, x:torch.Tensor, skip:torch.Tensor|None)->torch.Tensor:
-        if self.local_processing0 is not None:
-            x = self.local_processing0(x)
-        x = self.upconv(x)
+        if self.upconv is not None:
+            x = self.upconv(x)
         if skip is not None:
             x = x + skip
         x = self.local_processing(x)
@@ -277,12 +294,15 @@ def load_pretrained_weights(
     
     # dMAE models
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE
-    mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM" dMAE pretraining, also good
     
     # FM models
     # mae_checkpoint_path = f"{FM_logs}/lightning_logs/version_1/checkpoints/epoch=18-step=16036.ckpt" # FM model, pretrained for 21 epochs
     
+    # JEPA models
+    mae_checkpoint_path = f"{LeJEPA_logs}/lightning_logs/version_11/checkpoints/epoch=50-step=21522.ckpt" # LeJEPA model, pretrained
+
     mae_checkpoint = torch.load(mae_checkpoint_path, map_location="cpu", weights_only=False)
     mae_hparams = dict(mae_checkpoint.get("hyper_parameters", {}))
     mae_num_input_channels = int(mae_hparams.get("num_input_channels", 1))
@@ -321,7 +341,14 @@ def load_pretrained_weights(
         )
         # Load pre-trained classifier weights
         classifier_checkpoint_path = f"{Classifier_logs}/lightning_logs/version_24/checkpoints/epoch=8-step=3798.ckpt"
-        load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False, strict=False)
+        try:
+            load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False, strict=False)
+        except RuntimeError as exc:
+            warnings.warn(
+                "Skipping classifier checkpoint load because it does not match the current backbone "
+                f"shape after the L4 changes. The discriminative head will stay randomly initialized.\n{exc}",
+                stacklevel=2,
+            )
         # Extract the classifier head
         mnist_classifier_head = mnist_classifier.head
 

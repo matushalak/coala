@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 
 from cc.datasets.mnist import mnist
+from cc.ml.masking import add_masking_arguments, clear_mask_bank_caches, masking_kwargs_from_args, sample_keep_mask
 from cc.ml.sparse_cnn_unet import SparseCNNUNet
 from cc.utils import ExponentialMovingAverage
 
@@ -79,6 +80,12 @@ class COALA(pl.LightningModule):
         noise_level: float = 0.5,
         sigreg_loss_weight: float = 0.1,
         sigreg_max_samples: int = 1024,
+        masking_strategy: str = "random",
+        multi_block_scale_min: float = 0.15,
+        multi_block_scale_max: float = 0.2,
+        multi_block_aspect_ratio_min: float = 0.75,
+        multi_block_aspect_ratio_max: float = 1.5,
+        multi_block_square_aspect_ratio: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -106,26 +113,21 @@ class COALA(pl.LightningModule):
         self.sigreg = SIGReg(max_samples=sigreg_max_samples).eval()
         
     def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
-        """
-        Random patch mask.
-        Returns keep-mask (True = visible/kept, False = masked).
-        """
-        b, _, h, w = imgs.shape
-        patch_size = self.hparams.patch_size # define (square) patch size on pixel-level (eg. 4x4 px)
-        if h % patch_size != 0 or w % patch_size != 0:
-            raise ValueError(f"Image size ({h}, {w}) must be divisible by patch_size={patch_size}.")
+        return sample_keep_mask(
+            imgs,
+            patch_size=self.hparams.patch_size,
+            mask_ratio=self.hparams.mask_ratio,
+            masking_strategy=self.hparams.masking_strategy,
+            multi_block_scale_min=self.hparams.multi_block_scale_min,
+            multi_block_scale_max=self.hparams.multi_block_scale_max,
+            multi_block_aspect_ratio_min=self.hparams.multi_block_aspect_ratio_min,
+            multi_block_aspect_ratio_max=self.hparams.multi_block_aspect_ratio_max,
+            multi_block_square_aspect_ratio=self.hparams.multi_block_square_aspect_ratio,
+        )
 
-        ph, pw = h // patch_size, w // patch_size # number of patches along height and width
-        num_patches = ph * pw # total number of patches in the image
-        num_keep = max(1, int(round((1.0 - self.hparams.mask_ratio) * num_patches))) # number of unmasked patches
-
-        noise = torch.rand(b, num_patches, device=imgs.device)
-        keep_idx = noise.argsort(dim=1)[:, :num_keep]
-        keep_patch = torch.zeros(b, num_patches, device=imgs.device, dtype=torch.bool)
-        keep_patch.scatter_(1, keep_idx, True)
-        keep_patch = keep_patch.view(b, 1, ph, pw)
-        keep_pixel = keep_patch.repeat_interleave(patch_size, dim=2).repeat_interleave(patch_size, dim=3)
-        return keep_pixel
+    def on_train_epoch_start(self) -> None:
+        if self.hparams.masking_strategy in {"multi-block", "mixed"}:
+            clear_mask_bank_caches()
 
     @staticmethod
     def _weighted_spatial_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -510,6 +512,7 @@ def train_lejepa(args):
         denoise=args.denoise,
         sigreg_loss_weight=args.sigreg_loss_weight,
         sigreg_max_samples=args.sigreg_max_samples,
+        **masking_kwargs_from_args(args),
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -532,8 +535,16 @@ if __name__ == "__main__":
                         help="Whether to add noise to the visible pixels (denoising MAE).")
     parser.set_defaults(denoise=True)
     parser.add_argument("--noise_level", default=1.0, type=float, help="Level of noise to add for denoising.")
-    parser.add_argument("--mask_ratio", default=0.6, type=float, help="Fraction of patches to hide.")
-    parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
+    add_masking_arguments(parser)
+    parser.set_defaults(mask_ratio=0.6,
+                        patch_size=4,
+                        masking_strategy="multi-block", 
+                        multi_block_scale_min=0.1, 
+                        multi_block_scale_max=0.6, 
+                        multi_block_aspect_ratio_min=0.5, 
+                        multi_block_aspect_ratio_max=1.5, 
+                        multi_block_square_aspect_ratio=1.0
+                        )
 
     # JEPA params
     parser.add_argument("--masked_loss_weight", default=2.0, type=float, help="Extra weight for masked pixels in MSE.")

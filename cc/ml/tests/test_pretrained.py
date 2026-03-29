@@ -77,6 +77,12 @@ def evaluate_pretrained_checkpoint(
     visible_corrupt: bool = False,
     patch_size: int | None = None,
     masked_loss_weight: float | None = None,
+    masking_strategy: str | None = None,
+    multi_block_scale_min: float | None = None,
+    multi_block_scale_max: float | None = None,
+    multi_block_aspect_ratio_min: float | None = None,
+    multi_block_aspect_ratio_max: float | None = None,
+    multi_block_square_aspect_ratio: float | None = None,
     decoder_densify_mode: str | None = None,
     upconv_method: str | None = None,
     use_skip: bool | None = None,
@@ -100,6 +106,28 @@ def evaluate_pretrained_checkpoint(
     mask_ratio = float(hparams["mask_ratio"] if mask_ratio is None else mask_ratio)
     patch_size = int(hparams["patch_size"] if patch_size is None else patch_size)
     masked_loss_weight = float(hparams["masked_loss_weight"] if masked_loss_weight is None else masked_loss_weight)
+    masking_strategy = str(hparams.get("masking_strategy", "random") if masking_strategy is None else masking_strategy)
+    multi_block_scale_min = float(
+        hparams.get("multi_block_scale_min", 0.15) if multi_block_scale_min is None else multi_block_scale_min
+    )
+    multi_block_scale_max = float(
+        hparams.get("multi_block_scale_max", 0.2) if multi_block_scale_max is None else multi_block_scale_max
+    )
+    multi_block_aspect_ratio_min = float(
+        hparams.get("multi_block_aspect_ratio_min", 0.75)
+        if multi_block_aspect_ratio_min is None
+        else multi_block_aspect_ratio_min
+    )
+    multi_block_aspect_ratio_max = float(
+        hparams.get("multi_block_aspect_ratio_max", 1.5)
+        if multi_block_aspect_ratio_max is None
+        else multi_block_aspect_ratio_max
+    )
+    multi_block_square_aspect_ratio = float(
+        hparams.get("multi_block_square_aspect_ratio", 1.0)
+        if multi_block_square_aspect_ratio is None
+        else multi_block_square_aspect_ratio
+    )
     decoder_densify_mode = str(hparams["decoder_densify_mode"] if decoder_densify_mode is None else decoder_densify_mode)
     upconv_method = str(hparams["upconv_method"] if upconv_method is None else upconv_method)
     use_skip = bool(hparams["use_skip"] if use_skip is None else use_skip)
@@ -125,6 +153,12 @@ def evaluate_pretrained_checkpoint(
         mask_ratio=mask_ratio,
         patch_size=patch_size,
         masked_loss_weight=masked_loss_weight,
+        masking_strategy=masking_strategy,
+        multi_block_scale_min=multi_block_scale_min,
+        multi_block_scale_max=multi_block_scale_max,
+        multi_block_aspect_ratio_min=multi_block_aspect_ratio_min,
+        multi_block_aspect_ratio_max=multi_block_aspect_ratio_max,
+        multi_block_square_aspect_ratio=multi_block_square_aspect_ratio,
         num_input_channels=num_input_channels,
         decoder_densify_mode=decoder_densify_mode,
         use_skip=use_skip,

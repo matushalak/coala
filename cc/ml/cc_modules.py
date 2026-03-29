@@ -139,10 +139,11 @@ class CCModule(nn.Module):
         # Compute feedforward, feedback, and lateral inhibition contributions.
         ref = x if x is not None else (Y_old if Y_old is not None else context)
         assert ref is not None, "CCModule.forward needs at least one of x, context, or Y_old to infer batch/device."
+        keep_mask = self.keep_mask.expand(ref.shape[0], -1, -1, -1)
 
         # Pyramidal cells
         if x is not None:
-            y_FF = self.FF_conv(x, self.keep_mask)
+            y_FF = self.FF_conv(x, keep_mask)
         else:
             y_FF = torch.zeros((ref.shape[0], *self.dims_), device=ref.device, dtype=ref.dtype)
         y_FB = torch.zeros_like(y_FF)
@@ -150,8 +151,10 @@ class CCModule(nn.Module):
         
         # HVA cells
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
-            y_FB = self.FB_conv(context, y_FF) # y_FF is skip connection from SparK pretraining
-
+            y_FB = self.FB_conv(context, 
+                                None # y_FF
+                                ) # y_FF is skip connection from SparK pretraining
+            
         # "PV cells"
         if Y_old is not None: 
             y_LAT = self.LAT_conv(y_FF)
