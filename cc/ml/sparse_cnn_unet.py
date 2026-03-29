@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Literal
 
+# TODO: rethink how small want latent to be (4x4 might be too small)
+# Current masking scales naturally only for 28 / 14 / 7
+
 def downsample_center_mask(
     keep_mask: torch.BoolTensor,
     out_size: tuple[int, int],
@@ -308,6 +311,7 @@ class DenseLocalStage(nn.Module):
         norm_type: str = "rmsnorm",
     ):
         super().__init__()
+        self.n_channels = n_channels
         self.pre_norm = DenseNorm2d(norm_type=norm_type, normalized_shape=(n_channels, *spatial_dim))
         self.act = nn.GELU()
         self.block = (
@@ -340,19 +344,19 @@ class SparseCNNEncoder(nn.Module):
         super().__init__()
         # V1
         self.down28_to_28 = SparseConv2d(num_input_channels, num_filters // 2, kernel_size=3, padding=1, stride=1)
-        self.local28 = SparseLocalStage(num_filters // 2, spatial_dim=(28, 28), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.local28 = SparseLocalStage(num_filters // 2, spatial_dim=(28, 28), use_residual=True, kernel_size=1, norm_type=norm_type)
 
         # V2
         self.down28_to_14 = SparseConv2d(num_filters // 2, num_filters, kernel_size=3, padding=1, stride=2)
-        self.local14 = SparseLocalStage(num_filters, spatial_dim=(14, 14), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.local14 = SparseLocalStage(num_filters, spatial_dim=(14, 14), use_residual=True, kernel_size=1, norm_type=norm_type)
 
         # V3
         self.down14_to_7 = SparseConv2d(num_filters, 2 * num_filters, kernel_size=3, padding=1, stride=2)
-        self.local7 = SparseLocalStage(2 * num_filters, spatial_dim=(7, 7), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.local7 = SparseLocalStage(2 * num_filters, spatial_dim=(7, 7), use_residual=True, kernel_size=1, norm_type=norm_type)
 
         # V4
-        self.down7_to_4 = SparseConv2d(2 * num_filters, 4 * num_filters, kernel_size=3, padding=1, stride=2)
-        self.local4 = SparseLocalStage(4 * num_filters, spatial_dim=(4, 4), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.down7_to_4 = SparseConv2d(2 * num_filters, 4 * num_filters, kernel_size=1, padding=0, stride=1)
+        self.local4 = SparseLocalStage(4 * num_filters, spatial_dim=(7, 7), use_residual=True, kernel_size=1, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> dict[str, torch.Tensor]:
         x = x.float()
@@ -371,8 +375,8 @@ class SparseCNNEncoder(nn.Module):
         x7 = self.local7(x7, mask7)
 
         mask4 = downsample_center_mask(mask7, (4, 4), stride=2)
-        x4 = self.down7_to_4(x7, mask4)
-        x4 = self.local4(x4, mask4)
+        x4 = self.down7_to_4(x7, mask7)
+        x4 = self.local4(x4, mask7)
         
         return {
             "feat28": x28,
@@ -382,7 +386,7 @@ class SparseCNNEncoder(nn.Module):
             "mask28":keep_mask,
             "mask14": mask14,
             "mask7": mask7,
-            "mask4": mask4,
+            "mask4": mask7,
         }
 
 
@@ -400,7 +404,7 @@ class SparseCNNDecoder(nn.Module):
         num_filters: int = 32,
         densify_mode: str = "random",
         conv_method: Literal['transposed_conv', 'upsample+conv'] = "transposed_conv",
-        use_skip:bool = True,
+        use_skip:bool = False,
         norm_type: str = "rmsnorm"
     ):
         super().__init__()
@@ -423,22 +427,22 @@ class SparseCNNDecoder(nn.Module):
         nn.init.normal_(self.mask_token4, mean=0.0, std=0.02)
 
         # V4
-        self.local4 = DenseLocalStage(c4, spatial_dim=(4, 4), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.local4 = DenseLocalStage(c4, spatial_dim=(7, 7), use_residual=True, kernel_size=1, norm_type=norm_type)
         
         # V3
-        self.up4_to_7 = DenseUpConv2d(c4, c7, kernel_size=3, padding=1, stride=2, output_padding=0, method=conv_method)
-        self.local7 = DenseLocalStage(c7, spatial_dim=(7, 7), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.up4_to_7 = DenseUpConv2d(c4, c7, kernel_size=1, padding=0, stride=1, output_padding=0, method=conv_method)
+        self.local7 = DenseLocalStage(c7, spatial_dim=(7, 7), use_residual=True, kernel_size=1, norm_type=norm_type)
 
         # V2
         self.up7_to_14 = DenseUpConv2d(c7, c14, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
-        self.local14 = DenseLocalStage(c14, spatial_dim=(14, 14), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.local14 = DenseLocalStage(c14, spatial_dim=(14, 14), use_residual=True, kernel_size=1, norm_type=norm_type)
 
         # V1
         self.up14_to_28 = DenseUpConv2d(c14, c28, kernel_size=3, padding=1, stride=2, output_padding=1, method=conv_method)
-        self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=3, norm_type=norm_type)
+        self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=1, norm_type=norm_type)
 
-        # Predict output (retina)        
-        self.up28_to_out = nn.Sequential(nn.Conv2d(c28, num_output_channels, kernel_size=3, padding=1, stride=1),
+        # Predict output (retina), simple 1x1 conv over features       
+        self.up28_to_out = nn.Sequential(nn.Conv2d(c28, num_output_channels, kernel_size=1, padding=0, stride=1),
                                          nn.Hardtanh(-1, 1)
                                          )
 
@@ -499,7 +503,7 @@ class SparseCNNUNet(nn.Module):
         num_output_channels: int = 1,
         num_filters: int = 32,
         decoder_densify_mode: str = "random",
-        use_skip:bool = True,
+        use_skip:bool = False,
         upconv_method: Literal['transposed_conv', 'upsample+conv'] = "upsample+conv",
         norm_type: str = "rmsnorm"
     ):
