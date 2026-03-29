@@ -31,7 +31,7 @@ class JEPA(pl.LightningModule):
         norm_type: str = "rmsnorm",
         denoise: bool = False,
         reconstruction_loss: bool = False,
-        teacher_ema_decay:float = 0.99
+        teacher_ema_decay:float = 0.999
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -447,6 +447,7 @@ if __name__ == "__main__":
     # Masking / data params
     parser.add_argument("--denoise", action="store_true", 
                         help="Whether to add noise to the visible pixels (denoising MAE).")
+    parser.set_defaults(denoise=True)
     parser.add_argument("--mask_ratio", default=0.6, type=float, help="Fraction of patches to hide.")
     parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
     

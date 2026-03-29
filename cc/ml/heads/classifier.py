@@ -18,16 +18,10 @@ class ClassifierHead(TaskHead):
         freeze_encoder: bool = True,
         feature_key: str = "feat4",
     ):
+        # linear probe
         head = nn.Sequential(
-            nn.AdaptiveMaxPool2d((1, 1)), # better than average pool
             nn.Flatten(start_dim=1),
-            nn.Linear(latent_dim, latent_dim),
-            nn.LayerNorm(latent_dim),
-            nn.GELU(),
-            nn.Linear(latent_dim, latent_dim // 2),
-            nn.LayerNorm(latent_dim // 2),
-            nn.GELU(),
-            nn.Linear(latent_dim // 2, num_classes),
+            nn.Linear(latent_dim, num_classes),
         )
         super().__init__(
             backbone=encoder,

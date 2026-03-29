@@ -222,6 +222,7 @@ if __name__ == "__main__":
     # Masking / data params
     parser.add_argument("--denoise", action="store_true", 
                         help="Whether to add noise to the visible pixels (denoising MAE).")
+    parser.set_defaults(denoise=True)
     parser.add_argument("--mask_ratio", default=0.6, type=float, help="Fraction of patches to hide.")
     parser.add_argument("--patch_size", default=4, type=int, help="Patch size used for random masking.")
     parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels in MSE.")
@@ -239,6 +240,7 @@ if __name__ == "__main__":
                         help="Type of normalization to use in the model.")
     parser.add_argument("--no_skip", action="store_false", 
                         help="Whether to use skip connections in the decoder.")
+    parser.set_defaults(no_skip=False)
     
     # Logging / other params
     parser.add_argument("--data_dir", default="../data/", type=str, help="Directory where to look for the data.")
