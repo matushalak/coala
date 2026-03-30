@@ -611,7 +611,7 @@ def visualize_transition_panel(
                     ax.set_ylim(row_min - pad, row_max + pad)
 
     os.makedirs(save_path, exist_ok=True)
-    out_path = os.path.join(save_path, f"{name}_{'_'.join(selected_conditions)}.svg")
+    out_path = os.path.join(save_path, f"{name}_{'_'.join(selected_conditions)}.png")
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return out_path
@@ -923,7 +923,7 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         builder.set_plotter("D", plot_weight_evolution)
 
     os.makedirs(save_path, exist_ok=True)
-    fig, _ = builder.render(save_path=os.path.join(save_path, f"experiment_results_{name}.svg"), show=False)
+    fig, _ = builder.render(save_path=os.path.join(save_path, f"experiment_results_{name}.png"), show=False)
     plt.close(fig)
 
 
@@ -965,7 +965,7 @@ def visualize_novel_condition_quickplot(long_df: DataFrame, save_path: str = PLO
     )
 
     os.makedirs(save_path, exist_ok=True)
-    fig.savefig(os.path.join(save_path, f"experiment_results_{name}_novel_only.svg"), bbox_inches="tight")
+    fig.savefig(os.path.join(save_path, f"experiment_results_{name}_novel_only.png"), bbox_inches="tight")
     plt.close(fig)
 
 def wide_to_long(DF:DataFrame) -> DataFrame:

@@ -50,10 +50,12 @@ un_FF = nonresponder.copy()
 un_FF.update({
     "FFrule": "Hebbian",
     'FBrule': "Hebbian",
-    "w_ff_init": {'mu': [0.05, 0.05], 'sigma': 0},
+    "w_ff_init": {'mu': [0.01, 0.01], 'sigma': 0},
     'receives_context': (True, True),
-    "lr_ff": 0.001,
-    "lr_lat": 0.0001,
+    "lr_ff": 0.008,
+    "lr_fb": 0.0001,
+    'lr_lat': 0.001,
+    "lr_pv": 0.001,
     "w_lat_init": {'mu': [0.05, 0.05], 'sigma': 0},
     "W_pv_init": {'mu': ([0.1, 0.0], [0.0,0.1]), 'sigma': [0, 0]},
     })
@@ -63,9 +65,7 @@ un_FF.update({
 # especially because context independent of input
 # unresponsive probably because sub-threshold
 un_FB = nonresponder.copy()
-un_FB.update({
-    'receives_context': (True, True)
-    })
+un_FB.update({'receives_context': (True, True)})
 
 # FF -> unresponsive; ✅ (simple) cells that don't receive context and only adapt
 FF_un = broad.copy()
@@ -101,7 +101,8 @@ narrow_familiar = broad.copy()
 narrow_familiar.update({
     "w_ff_init": {'mu': [0.9, 0.01], 'sigma': 0},
     "w_fb_init": {'mu': [0.01, 0.01], 'sigma': 0},
-    # NOTE: need to already have more PV inhibition for the novel stim. otherwise no reason not to have FF response there as well
+    # NOTE: need to already have more PV inhibition for the novel stim. 
+    # otherwise no reason not to have full FB response there as well
     "w_lat_init": {'mu': [0.3, 1.5], 'sigma': 0}, 
     "W_pv_init": {'mu': ([0.9, 0.1], [0.1,0.9]), 'sigma': [0, 0]},
     'lr_lat': 0.1
@@ -113,7 +114,8 @@ narrow_familiar.update({
 narrow_novel = broad.copy()
 narrow_novel.update({
     "w_ff_init": {'mu': [0.01, 0.9], 'sigma': 0},
-    "w_fb_init": {'mu': [0.01, 0.15], 'sigma': 0}, # a bit of FB initial response to match "averaged" novel neurons
+    # a bit of FB initial response to match "averaged" novel neurons
+    "w_fb_init": {'mu': [0.01, 0.15], 'sigma': 0}, 
     "w_lat_init": {'mu': [0.3, 0.3], 'sigma': 0},
     "lr_fb": 0.002,
     })
@@ -139,7 +141,7 @@ FB_FB.update({
 
 minimal_configs = {
     "un_un": nonresponder,
-    # "un_FF": un_FF, # Hebbian FF and FB plasticity
+    "un_FF": un_FF, # Hebbian FF and FB plasticity
     "un_FB": un_FB,
     
     "FF_un": FF_un,
