@@ -390,6 +390,22 @@ class SparseCNNEncoder(nn.Module):
         }
 
 
+class ReconstructionHead(nn.Module):
+    """
+    Simple 1x1 conv to map decoder features to output image (retina) space (-1, +1) range.
+    """
+
+    def __init__(self, in_channels: int, num_output_channels: int = 1):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, num_output_channels, kernel_size=1, padding=0, stride=1),
+            nn.Hardtanh(-1, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
 class SparseCNNDecoder(nn.Module):
     """
     Dense decoder with UNet skips.
@@ -442,9 +458,7 @@ class SparseCNNDecoder(nn.Module):
         self.local28 = DenseLocalStage(c28, spatial_dim=(28, 28), use_residual=True, kernel_size=1, norm_type=norm_type)
 
         # Predict output (retina), simple 1x1 conv over features       
-        self.up28_to_out = nn.Sequential(nn.Conv2d(c28, num_output_channels, kernel_size=1, padding=0, stride=1),
-                                         nn.Hardtanh(-1, 1)
-                                         )
+        self.up28_to_out = ReconstructionHead(c28, num_output_channels=num_output_channels)
 
     def set_densify_mode(self, mode: str) -> None:
         if mode not in self.DENSIFY_MODES:

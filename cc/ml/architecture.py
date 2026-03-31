@@ -7,7 +7,7 @@ import re
 import warnings
 
 from cc.ml.sparse_cnn_unet import SparseCNNEncoder, SparseCNNDecoder, SparseCNNUNet, SparseLocalStage, DenseLocalStage, DenseUpConv2d, SparseConv2d
-from cc.ml import MAE_logs, Classifier_logs, FM_logs, LeJEPA_logs
+from cc.ml import MAE_logs, Classifier_logs, FM_logs, Head_logs, LeJEPA_logs
 from cc.ml.utils import load_checkpoint
 from cc.ml.heads.classifier import ClassifierHead
 from cc.ml.cc_modules import CCModule
@@ -285,15 +285,85 @@ class FB_Conv2d(nn.Module):
         return x
 
 # --- COALANet utils ---
+_RECONSTRUCTION_HEAD_CHECKPOINTS = sorted(
+    (Path(Head_logs) / "reconstruction" / "lightning_logs" / "version_1" / "checkpoints").glob("*.ckpt")
+)
+DEFAULT_RECONSTRUCTION_HEAD_CHECKPOINT_PATH = (
+    str(_RECONSTRUCTION_HEAD_CHECKPOINTS[-1]) if _RECONSTRUCTION_HEAD_CHECKPOINTS else None
+)
+_CLASSIFIER_CHECKPOINTS = sorted(
+    (Path(Classifier_logs) / "lightning_logs").glob("version_*/checkpoints/*.ckpt")
+)
+DEFAULT_CLASSIFIER_CHECKPOINT_PATH = str(_CLASSIFIER_CHECKPOINTS[-1]) if _CLASSIFIER_CHECKPOINTS else None
+
+
+def _load_generative_head_weights(
+    generative_head: nn.Module,
+    checkpoint_path: str | Path | None,
+) -> None:
+    if checkpoint_path is None:
+        return
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        warnings.warn(
+            f"Skipping reconstruction-head load because checkpoint does not exist: {checkpoint_path}",
+            stacklevel=2,
+        )
+        return
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    candidate_prefixes = (
+        "model.decoder.up28_to_out.",
+        "decoder.up28_to_out.",
+        "up28_to_out.",
+    )
+
+    head_state_dict = None
+    for prefix in candidate_prefixes:
+        extracted = {key[len(prefix):]: value for key, value in state_dict.items() if key.startswith(prefix)}
+        if extracted:
+            head_state_dict = extracted
+            break
+
+    if head_state_dict is None:
+        warnings.warn(
+            "Skipping reconstruction-head load because no compatible generative-head weights were found in "
+            f"{checkpoint_path}.",
+            stacklevel=2,
+        )
+        return
+
+    generative_head.load_state_dict(head_state_dict, strict=True)
+
+
+def _infer_encoder_latent_dim(
+    encoder: SparseCNNEncoder,
+    *,
+    num_input_channels: int,
+    spatial_size: tuple[int, int] = (28, 28),
+    feature_key: str = "feat4",
+) -> int:
+    param = next(encoder.parameters())
+    keep_mask = torch.ones((1, 1, *spatial_size), device=param.device, dtype=torch.bool)
+    dummy = torch.zeros((1, num_input_channels, *spatial_size), device=param.device, dtype=param.dtype)
+    with torch.no_grad():
+        features = encoder(dummy, keep_mask=keep_mask)[feature_key]
+    return int(features[0].numel())
+
+
 def load_pretrained_weights(
     mode: Literal["discriminative", "generative"] = "discriminative",
+    reconstruction_head_checkpoint_path: str | Path | None = DEFAULT_RECONSTRUCTION_HEAD_CHECKPOINT_PATH,
+    classifier_checkpoint_path: str | Path | None = DEFAULT_CLASSIFIER_CHECKPOINT_PATH,
 )->COALANet:
     # MAE models
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt" # improved MAE
     
     # dMAE models
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE
+    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE, random level of noise
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
     # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM" dMAE pretraining, also good
     
@@ -325,30 +395,33 @@ def load_pretrained_weights(
     )
     # Load pre-trained autoencoder weights (replace with actual checkpoint path)
     load_checkpoint(mae_model, mae_checkpoint_path, strict=False)
+    _load_generative_head_weights(mae_model.decoder.up28_to_out, reconstruction_head_checkpoint_path)
     encoder:SparseCNNEncoder = mae_model.encoder
     decoder:SparseCNNDecoder = mae_model.decoder
     
     mnist_classifier_head = None
     if mode == "discriminative":
-        # Load pre-trained classifier with head
-        mnist_classifier = ClassifierHead.from_pretrained_unet(
-            checkpoint_path=mae_checkpoint_path,
-            num_classes=10, # MNIST has 10 classes
-            latent_dim=32*4, # latent dimension from the MAE model 
+        latent_dim = _infer_encoder_latent_dim(
+            encoder,
+            num_input_channels=mae_num_input_channels,
+            feature_key="feat4",
+        )
+        mnist_classifier = ClassifierHead(
+            encoder=encoder,
+            num_classes=10,
+            latent_dim=latent_dim,
             lr=1e-3,
             freeze_encoder=True,
-            upconv_method=mae_upconv_method,
         )
-        # Load pre-trained classifier weights
-        classifier_checkpoint_path = f"{Classifier_logs}/lightning_logs/version_24/checkpoints/epoch=8-step=3798.ckpt"
-        try:
-            load_checkpoint(mnist_classifier, classifier_checkpoint_path, weights_only=False, strict=False)
-        except RuntimeError as exc:
-            warnings.warn(
-                "Skipping classifier checkpoint load because it does not match the current backbone "
-                f"shape after the L4 changes. The discriminative head will stay randomly initialized.\n{exc}",
-                stacklevel=2,
-            )
+        if classifier_checkpoint_path is not None:
+            try:
+                load_checkpoint(mnist_classifier, str(classifier_checkpoint_path), weights_only=False, strict=False)
+            except RuntimeError as exc:
+                warnings.warn(
+                    "Skipping classifier checkpoint load because it does not match the current backbone "
+                    f"shape after the L4 changes. The discriminative head will stay randomly initialized.\n{exc}",
+                    stacklevel=2,
+                )
         # Extract the classifier head
         mnist_classifier_head = mnist_classifier.head
 
@@ -581,9 +654,10 @@ if __name__ == "__main__":
 
     target_type = "image" if args.mode == "generative" else "label"
     coalanet = load_pretrained_weights(mode=args.mode)
-    examples, targets = visualize_msmnist_examples(
+    total_num_masks = max(1, args.number_of_masks + args.number_of_masks // 2)
+    examples, task_targets = visualize_msmnist_examples(
         num_examples=args.num_examples,
-        number_of_masks=args.number_of_masks//2,
+        number_of_masks=total_num_masks,
         timesteps_per_mask=args.timesteps_per_mask,
         mask_ratio=args.mask_ratio,
         masked_fill=_parse_masked_fill_arg(args.masked_fill),
@@ -593,24 +667,6 @@ if __name__ == "__main__":
         show=not args.hide_input_grid,
         patch_size=args.patch_size,
     )
-
-    examples2, targets2 = visualize_msmnist_examples(
-        num_examples=args.num_examples,
-        number_of_masks=args.number_of_masks,
-        timesteps_per_mask=args.timesteps_per_mask,
-        mask_ratio=args.mask_ratio,
-        masked_fill=_parse_masked_fill_arg(args.masked_fill),
-        visible_corrupt=args.visible_corrupt,
-        accepted_digits=args.accepted_digits,
-        target_type=target_type,
-        show=not args.hide_input_grid,
-        patch_size=args.patch_size,
-    )
-
-    examples = torch.cat((examples, examples2), dim=1)
-    targets = torch.cat((targets.repeat_interleave(args.number_of_masks//2 * args.timesteps_per_mask, dim=1),
-                         targets2.repeat_interleave(args.number_of_masks * args.timesteps_per_mask, dim=1)),
-                         dim=1)
 
     with torch.no_grad():
         model_result = coalanet(examples, return_activation_maps=not args.hide_activation_maps)
@@ -625,12 +681,12 @@ if __name__ == "__main__":
 
     if args.mode == "discriminative":
         logits = stack_temporal_logits(outputs)
-        fig = create_temporal_prediction_figure(logits, targets)
+        fig = create_temporal_prediction_figure(logits, task_targets)
     else:
         reconstructions = stack_temporal_reconstructions(outputs)
-        fig = create_temporal_reconstruction_figure(reconstructions, targets)
+        fig = create_temporal_reconstruction_figure(reconstructions, task_targets)
         grid = create_temporal_reconstruction_grid(
-            targets,
+            task_targets,
             examples,
             reconstructions,
             num_examples=args.num_examples,

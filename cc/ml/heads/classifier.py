@@ -33,7 +33,15 @@ class ClassifierHead(TaskHead):
             monitor_metric="val_classification_loss",
             monitor_mode="min",
         )
-        self.save_hyperparameters(ignore=["encoder"])
+        self.save_hyperparameters(
+            {
+                "num_classes": num_classes,
+                "latent_dim": latent_dim,
+                "lr": lr,
+                "freeze_encoder": freeze_encoder,
+                "feature_key": feature_key,
+            }
+        )
 
     @classmethod
     def from_pretrained_unet(
