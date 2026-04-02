@@ -11,6 +11,8 @@ from cc.ml.architecture.modules.utils import (
 
 
 def _flatten_tokens(x: torch.Tensor) -> torch.Tensor:
+    # The ViT family in this repo uses only spatial patch tokens.
+    # No CLS token is appended anywhere in the encoder or decoder blocks.
     return x.flatten(2).transpose(1, 2)
 
 

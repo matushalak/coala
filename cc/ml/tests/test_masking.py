@@ -462,7 +462,7 @@ def test_mixed_strategy_labels_split_batches_evenly():
 
 
 def test_mae_supports_mixed_masking_strategy():
-    from cc.ml.MAEmodel import MAE
+    from cc.ml.pretraining.MAEmodel import MAE
 
     torch.manual_seed(0)
     model = MAE(

@@ -8,7 +8,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[3]))
 
-from cc.ml import MAE_logs, FM_logs
+from cc.ml import MAE_logs, FM_logs, dataset_lightning_logs_dir
 
 def _load_checkpoint(torch, checkpoint_path: Path) -> dict[str, object]:
     return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -95,7 +95,7 @@ def evaluate_pretrained_checkpoint(
 
     from cc import DATADIR
     from cc.datasets.mnist import mnist
-    from cc.ml.MAEmodel import MAE
+    from cc.ml.pretraining.MAEmodel import MAE
 
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
@@ -242,13 +242,13 @@ def evaluate_pretrained_checkpoint(
 # Command-line interface
 DEFAULT_CHECKPOINT_PATH = (
     # MAE models
-    # f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
-    # f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt" # improved MAE
+    # f"{dataset_lightning_logs_dir(MAE_logs, 'mnist')}/version_13/checkpoints/epoch=19-step=8440.ckpt"
+    # f"{dataset_lightning_logs_dir(MAE_logs, 'mnist')}/version_18/checkpoints/epoch=19-step=8440.ckpt" # improved MAE
     
     # dMAE models
-    # f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE
-    f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
-    # f"{MAE_logs}/lightning_logs/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM"-type noise dMAE pretraining, also good
+    # f"{dataset_lightning_logs_dir(MAE_logs, 'mnist')}/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE
+    f"{dataset_lightning_logs_dir(MAE_logs, 'mnist')}/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
+    # f"{dataset_lightning_logs_dir(MAE_logs, 'mnist')}/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM"-type noise dMAE pretraining, also good
     
     # FM models
     # f"{FM_logs}/lightning_logs/version_1/checkpoints/epoch=18-step=16036.ckpt" # FM model, pretrained for 21 epochs

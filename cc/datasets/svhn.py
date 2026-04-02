@@ -23,7 +23,7 @@ from cc import DATADIR
 
 def svhn(root=DATADIR, batch_size=128, num_workers=4, download=True):
     """
-    Returns data loaders for normalized SVHN.
+    Returns data loaders for SVHN with pixel values in [-1, 1].
 
     Inputs:
         root - Directory where SVHN is downloaded/stored.
@@ -31,13 +31,10 @@ def svhn(root=DATADIR, batch_size=128, num_workers=4, download=True):
         num_workers - Number of workers to use in the data loaders.
         download - If True, SVHN is downloaded if not found in root.
     """
-    # Training-set statistics (SVHN train split).
-    mean = (0.4377, 0.4438, 0.4728)
-    std = (0.1980, 0.2010, 0.1970)
     data_transforms = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ]
     )
 

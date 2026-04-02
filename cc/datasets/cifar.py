@@ -23,7 +23,7 @@ from cc import DATADIR
 
 def cifar10(root=DATADIR, batch_size=128, num_workers=4, download=True):
     """
-    Returns data loaders for normalized CIFAR-10.
+    Returns data loaders for CIFAR-10 with pixel values in [-1, 1].
 
     Inputs:
         root - Directory where CIFAR-10 is downloaded/stored.
@@ -31,13 +31,10 @@ def cifar10(root=DATADIR, batch_size=128, num_workers=4, download=True):
         num_workers - Number of workers to use in the data loaders.
         download - If True, CIFAR-10 is downloaded if not found in root.
     """
-    # Training-set statistics (CIFAR-10 train split).
-    mean = (0.4914, 0.4822, 0.4465)
-    std = (0.2470, 0.2435, 0.2616)
     data_transforms = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ]
     )
 

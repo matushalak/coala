@@ -7,15 +7,15 @@ import torch.nn.functional as F
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torchvision.utils import make_grid, save_image
 
-from cc.datasets.mnist import mnist
-from cc.ml import Head_logs, LeJEPA_logs
+from cc import DATADIR
+from cc.datasets import get_dataloaders
+from cc.ml import Head_logs, LeJEPA_logs, dataset_lightning_logs_dir, dataset_log_dir
 from cc.ml.masking import add_masking_arguments, clear_mask_bank_caches, masking_kwargs_from_args, sample_keep_mask
 from cc.ml.architecture.sparse_cnn_unet import SparseCNNUNet
 
 
 DEFAULT_CHECKPOINT_PATH = os.path.join(
-    LeJEPA_logs,
-    "lightning_logs",
+    dataset_lightning_logs_dir(LeJEPA_logs, "mnist"),
     "version_11",
     "checkpoints",
     "epoch=50-step=21522.ckpt",
@@ -57,6 +57,7 @@ class ReconstructionHead(pl.LightningModule):
         patch_size: int = 4,
         masked_loss_weight: float = 4.0,
         denoise: bool = False,
+        denoise_sigma: float = 1.0,
         masking_strategy: str = "random",
         multi_block_scale_min: float = 0.15,
         multi_block_scale_max: float = 0.2,
@@ -97,8 +98,8 @@ class ReconstructionHead(pl.LightningModule):
             keep_mask = self._mask(imgs)
         model_input = imgs
         if self.hparams.denoise:
-            noise = torch.randn_like(imgs)
-            model_input = torch.where(keep_mask, imgs + torch.randn_like(imgs), noise).clamp_(-1.0, 1.0)
+            noise = self.hparams.denoise_sigma * torch.randn_like(imgs)
+            model_input = torch.where(keep_mask, imgs + noise, noise).clamp_(-1.0, 1.0)
         recon = self.model(model_input, keep_mask=keep_mask)
         return recon, keep_mask
 
@@ -159,7 +160,7 @@ class ReconstructionPlotCallback(pl.Callback):
         imgs = self._example_batch.to(pl_module.device)
         recon, keep_mask = pl_module.reconstruct(imgs)
         grey = 0.0
-        visible_noise = 0.0 if not pl_module.hparams.denoise else torch.randn_like(imgs).clamp_(-1.0, 1.0)
+        visible_noise = 0.0 if not pl_module.hparams.denoise else (pl_module.hparams.denoise_sigma * torch.randn_like(imgs)).clamp_(-1.0, 1.0)
         masked = torch.where(keep_mask, imgs + visible_noise, grey).float()
         panel = torch.cat([imgs.float(), masked, recon.float()], dim=0).detach().cpu()
         grid = make_grid(
@@ -187,11 +188,14 @@ class ReconstructionPlotCallback(pl.Callback):
 
 
 def train_reconstruction_head(args) -> list[dict[str, torch.Tensor]]:
-    os.makedirs(args.log_dir, exist_ok=True)
-    train_loader, val_loader, test_loader = mnist(
+    data_dir = os.path.abspath(args.data_dir)
+    log_dir = dataset_log_dir(args.log_dir, args.dataset)
+    os.makedirs(log_dir, exist_ok=True)
+    train_loader, val_loader, test_loader = get_dataloaders(
+        args.dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        root=args.data_dir,
+        root=data_dir,
     )
 
     model = ReconstructionHead(
@@ -215,7 +219,7 @@ def train_reconstruction_head(args) -> list[dict[str, torch.Tensor]]:
         save_to_disk=args.save_recon_plots,
     )
     trainer = pl.Trainer(
-        default_root_dir=args.log_dir,
+        default_root_dir=log_dir,
         accelerator="auto",
         max_epochs=args.epochs,
         callbacks=[checkpoint_callback, recon_plot_callback],
@@ -242,7 +246,8 @@ if __name__ == "__main__":
     parser.add_argument("--masked_loss_weight", default=4.0, type=float, help="Extra weight for masked pixels.")
     parser.add_argument("--denoise", action="store_true", help="Corrupt visible pixels with noise before reconstruction.")
     add_masking_arguments(parser)
-    parser.add_argument("--data_dir", default="../data/", type=str, help="Dataset directory.")
+    parser.add_argument("--dataset", default="mnist", type=str, help="Dataset name from cc.datasets registry.")
+    parser.add_argument("--data_dir", default=DATADIR, type=str, help="Dataset directory.")
     parser.add_argument("--num_workers", default=4, type=int, help="Dataloader workers.")
     parser.add_argument("--log_dir", default=DEFAULT_LOG_DIR, type=str, help="Lightning log directory.")
     parser.add_argument("--num_plot_images", default=16, type=int, help="How many reconstructions to show per plot.")

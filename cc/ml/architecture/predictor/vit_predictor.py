@@ -5,6 +5,8 @@ from cc.ml.architecture.modules.utils import sorted_stage_keys
 
 
 def _flatten_tokens(x: torch.Tensor) -> torch.Tensor:
+    # Predictor attention also operates on the spatial token grid only.
+    # No CLS token is used here.
     return x.flatten(2).transpose(1, 2)
 
 

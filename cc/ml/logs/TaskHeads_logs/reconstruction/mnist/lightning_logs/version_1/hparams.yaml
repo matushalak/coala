@@ -1,4 +1,4 @@
-checkpoint_path: /Users/matushalak/Documents/ini/cc/ml/LeJEPA_logs/lightning_logs/version_11/checkpoints/epoch=50-step=21522.ckpt
+checkpoint_path: /Users/matushalak/Documents/ini/cc/ml/logs/LeJEPA_logs/mnist/lightning_logs/version_11/checkpoints/epoch=50-step=21522.ckpt
 denoise: true
 lr: 0.001
 mask_ratio: 0.6

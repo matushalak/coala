@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-from cc.ml import Head_logs
+from cc.ml import Head_logs, dataset_log_dir
 
 def _expects_keep_mask_arg(module: nn.Module) -> bool:
     try:
@@ -81,10 +81,11 @@ class TaskHead(pl.LightningModule):
 def create_task_head_trainer(
     model: TaskHead,
     log_root_dir: str = Head_logs,
+    dataset_name: str = "mnist",
     callbacks: list[Any] | None = None,
     **trainer_kwargs: Any,
 ) -> pl.Trainer:
-    task_log_dir = os.path.join(log_root_dir, model.task_name)
+    task_log_dir = dataset_log_dir(os.path.join(log_root_dir, model.task_name), dataset_name)
     os.makedirs(task_log_dir, exist_ok=True)
 
     callback_list = list(callbacks or [])

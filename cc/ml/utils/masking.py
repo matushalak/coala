@@ -29,6 +29,7 @@ def add_masking_arguments(
     default_mask_ratio: float = 0.6,
     default_patch_size: int = 4,
     default_masking_strategy: str = "random",
+    default_denoise_sigma: float = 1.0,
 ):
     parser.add_argument("--mask_ratio", default=default_mask_ratio, type=float, help="Fraction of patches to hide.")
     parser.add_argument("--patch_size", default=default_patch_size, type=int, help="Patch size used for masking.")
@@ -42,6 +43,12 @@ def add_masking_arguments(
             "'multi-block' masks one square block plus two rectangular blocks, and "
             "'mixed' uses an even mix of both within each batch."
         ),
+    )
+    parser.add_argument(
+        "--denoise_sigma",
+        default=default_denoise_sigma,
+        type=float,
+        help="Standard deviation of the zero-mean Gaussian noise used by denoising objectives.",
     )
     parser.add_argument(
         "--multi_block_scale_min",
@@ -84,6 +91,7 @@ def add_masking_arguments(
 def masking_kwargs_from_args(args) -> dict[str, float | str]:
     return {
         "masking_strategy": args.masking_strategy,
+        "denoise_sigma": args.denoise_sigma,
         "multi_block_scale_min": args.multi_block_scale_min,
         "multi_block_scale_max": args.multi_block_scale_max,
         "multi_block_aspect_ratio_min": args.multi_block_aspect_ratio_min,

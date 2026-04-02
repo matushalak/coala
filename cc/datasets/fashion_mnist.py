@@ -23,7 +23,7 @@ from cc import DATADIR
 
 def fashion_mnist(root=DATADIR, batch_size=128, num_workers=4, download=True):
     """
-    Returns data loaders for normalized FashionMNIST.
+    Returns data loaders for FashionMNIST with pixel values in [-1, 1].
 
     Inputs:
         root - Directory where FashionMNIST is downloaded/stored.
@@ -31,13 +31,10 @@ def fashion_mnist(root=DATADIR, batch_size=128, num_workers=4, download=True):
         num_workers - Number of workers to use in the data loaders.
         download - If True, FashionMNIST is downloaded if not found in root.
     """
-    # Training-set statistics (FashionMNIST train split).
-    mean = (0.2860,)
-    std = (0.3530,)
     data_transforms = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=(0.5,), std=(0.5,)),
         ]
     )
 
