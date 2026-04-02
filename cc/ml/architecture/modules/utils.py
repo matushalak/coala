@@ -1,7 +1,45 @@
+import re
+
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Literal
+
+
+def pair(value: int | tuple[int, int]) -> tuple[int, int]:
+    if isinstance(value, tuple):
+        assert len(value) == 2
+        return value
+    return value, value
+
+
+def conv_output_shape(
+    input_shape: tuple[int, int],
+    kernel_size: int | tuple[int, int],
+    stride: int | tuple[int, int],
+    padding: int | tuple[int, int],
+) -> tuple[int, int]:
+    kernel_size = pair(kernel_size)
+    stride = pair(stride)
+    padding = pair(padding)
+    out_h = ((input_shape[0] + 2 * padding[0] - kernel_size[0]) // stride[0]) + 1
+    out_w = ((input_shape[1] + 2 * padding[1] - kernel_size[1]) // stride[1]) + 1
+    return out_h, out_w
+
+
+def convtranspose_output_padding(
+    input_shape: tuple[int, int],
+    output_shape: tuple[int, int],
+    kernel_size: int | tuple[int, int],
+    stride: int | tuple[int, int],
+    padding: int | tuple[int, int],
+) -> tuple[int, int]:
+    kernel_size = pair(kernel_size)
+    stride = pair(stride)
+    padding = pair(padding)
+    base_h = (input_shape[0] - 1) * stride[0] - (2 * padding[0]) + kernel_size[0]
+    base_w = (input_shape[1] - 1) * stride[1] - (2 * padding[1]) + kernel_size[1]
+    output_padding = output_shape[0] - base_h, output_shape[1] - base_w
+    assert 0 <= output_padding[0] < stride[0]
+    assert 0 <= output_padding[1] < stride[1]
+    return output_padding
 
 
 def downsample_center_mask(
@@ -9,35 +47,20 @@ def downsample_center_mask(
     out_size: tuple[int, int],
     stride: int = 2,
 ) -> torch.BoolTensor:
-    """
-    Downsample activity by selecting center-aligned positions (slice-based).
-    For k=3, p=1, s=2 convs, output (i, j) aligns to input (2i, 2j).
-    """
     out_h, out_w = out_size
     return keep_mask[:, :, ::stride, ::stride][:, :, :out_h, :out_w]
 
 
 def sp_conv_forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor):
-    ''''
-    Simplest sparse convolution workaround (like SparK-style pretraining)
-    '''
     x = super(type(self), self).forward(x)
     return x * keep_mask.to(dtype=x.dtype)
 
 
 def _expand_keep_mask(x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
-    if keep_mask.ndim != x.ndim:
-        raise ValueError(
-            f"keep_mask must have the same rank as x, got {keep_mask.ndim} and {x.ndim}."
-        )
-    if keep_mask.shape[0] != x.shape[0] or keep_mask.shape[-2:] != x.shape[-2:]:
-        raise ValueError(
-            f"keep_mask shape {tuple(keep_mask.shape)} is incompatible with x shape {tuple(x.shape)}."
-        )
-    if keep_mask.shape[1] not in (1, x.shape[1]):
-        raise ValueError(
-            f"keep_mask channel dimension must be 1 or match x, got {keep_mask.shape[1]} and {x.shape[1]}."
-        )
+    assert keep_mask.ndim == x.ndim
+    assert keep_mask.shape[0] == x.shape[0]
+    assert keep_mask.shape[-2:] == x.shape[-2:]
+    assert keep_mask.shape[1] in (1, x.shape[1])
     return keep_mask.to(dtype=x.dtype).expand_as(x)
 
 
@@ -56,3 +79,14 @@ def _masked_mean_and_var(
 
 def _resolve_eps(eps: float | None, x: torch.Tensor) -> float:
     return torch.finfo(x.dtype).eps if eps is None else eps
+
+
+def sorted_stage_keys(latents: dict[str, torch.Tensor], prefix: str) -> list[str]:
+    keys = [key for key in latents if key.startswith(prefix)]
+
+    def _suffix(name: str) -> int:
+        match = re.search(r"(\d+)$", name)
+        assert match is not None
+        return int(match.group(1))
+
+    return sorted(keys, key=_suffix)
