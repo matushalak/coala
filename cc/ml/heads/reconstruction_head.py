@@ -10,7 +10,7 @@ from torchvision.utils import make_grid, save_image
 from cc.datasets.mnist import mnist
 from cc.ml import Head_logs, LeJEPA_logs
 from cc.ml.masking import add_masking_arguments, clear_mask_bank_caches, masking_kwargs_from_args, sample_keep_mask
-from cc.ml.sparse_cnn_unet import SparseCNNUNet
+from cc.ml.architecture.sparse_cnn_unet import SparseCNNUNet
 
 
 DEFAULT_CHECKPOINT_PATH = os.path.join(

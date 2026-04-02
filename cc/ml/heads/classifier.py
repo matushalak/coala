@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from cc.ml.heads.task_head import TaskHead
-from cc.ml.sparse_cnn_unet import SparseCNNEncoder, SparseCNNUNet
+from cc.ml.architecture.sparse_cnn_unet import SparseCNNEncoder, SparseCNNUNet
 
 # Specific task heads
 class ClassifierHead(TaskHead):

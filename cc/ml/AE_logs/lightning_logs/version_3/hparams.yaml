@@ -1,4 +1,0 @@
-lr: 0.001
-num_filters: 32
-num_input_channels: 1
-z_dim: 20
