@@ -46,7 +46,15 @@ class CCNeuron(nn.Module):
         seed:int = 42,
         receives_context:tuple[bool, bool ] = (True, True),
         FFrule:Literal['anti-Hebbian', 'Hebbian'] = 'anti-Hebbian',
-        FBrule:Literal["dampened-anti-Hebbian", "Hebbian"] = "dampened-anti-Hebbian"
+        FBrule:Literal["dampened-anti-Hebbian", "Hebbian"] = "dampened-anti-Hebbian",
+        use_FF_connection:bool = True,
+        FF_plasticity:bool = True,
+        use_FB_connection:bool = True,
+        FB_plasticity:bool = True,
+        use_lat_connection:bool = True,
+        lat_plasticity:bool = True,
+        use_pv_connection:bool = True,
+        pv_plasticity:bool = True
     ):
         super().__init__()
         if alpha <= 0:
@@ -98,6 +106,16 @@ class CCNeuron(nn.Module):
         # Feedback specificity (decoding image identity with 60% accuracy)
         self.fb_specificity = torch.tensor([[0.3, 0.2],
                                             [0.2, 0.3]])
+        
+        # Ablation parameters
+        self.use_FF_connection = use_FF_connection
+        self.FF_plasticity = FF_plasticity
+        self.use_FB_connection = use_FB_connection
+        self.FB_plasticity = FB_plasticity
+        self.use_lat_connection = use_lat_connection
+        self.lat_plasticity = lat_plasticity
+        self.use_pv_connection = use_pv_connection
+        self.pv_plasticity = pv_plasticity
 
     def forward(self, x: torch.Tensor, c: torch.Tensor
                 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -112,16 +130,20 @@ class CCNeuron(nn.Module):
         assert x.shape == (self.n_features,) and c.shape == (self.n_context,)
 
         # feedforward excitation to PV neurons
-        p = self.pv(self.activation(self.W_pv @ x + (self.pyramidal.ema * self.w_lat)) 
-                    + randn_reparam(size=self.pv.ema.shape, mu=0, sigma=0.06) # small random baseline input
-                    ) 
+        pv_ff = self.W_pv @ x * self.use_pv_connection
+        pv_lat = self.pyramidal.ema * self.w_lat * self.use_lat_connection
+        p = self.pv(self.activation(
+            pv_ff + pv_lat 
+            + randn_reparam(size=self.pv.ema.shape, mu=0, sigma=0.06) # small random baseline input
+            )) 
         
         a = self.adapt(self.pyramidal.ema) # update adaptation variable 
 
+        y_ff  = torch.dot(self.w_ff, x) * self.use_FF_connection # feedforward excitation
+        y_fb = torch.dot(self.w_fb, c * self.receives_context) * self.use_FB_connection # feedback excitation 
+        y_lat = torch.dot(self.w_lat, p) * self.use_lat_connection # "lateral" inhibition 
         y = self.pyramidal(self.activation(
-            torch.dot(self.w_ff, x) # feedforward excitation
-            + torch.dot(self.w_fb, c * self.receives_context) # feedback excitation
-            - torch.dot(self.w_lat, p) # "lateral" inhibition 
+            y_ff + y_fb - y_lat
             + randn_reparam(size=(), mu=0, sigma=0.01) # small random baseline input
             - a # adaptation
             ))
@@ -135,29 +157,36 @@ class CCNeuron(nn.Module):
         One local update step using current inputs (x_t, c_t).
         Returns y_{t+1}, p_t as computed for this step.
         """
+        dw_ff, dw_fb, dw_lat, dw_W_pv = (torch.zeros_like(self.w_ff), torch.zeros_like(self.w_fb), 
+                                         torch.zeros_like(self.w_lat), torch.zeros_like(self.W_pv))
+        
         # 1) Anti-Hebbian update for w_ff
-        match self.FFrule:
-            case "anti-Hebbian":
-                dw_ff = - self.lr_ff * (y_next * x_t)
-            case "Hebbian":
-                dw_ff = self.lr_ff * (y_next * x_t)
+        if self.FF_plasticity:
+            match self.FFrule:
+                case "anti-Hebbian":
+                    dw_ff = - self.lr_ff * (y_next * x_t)
+                case "Hebbian":
+                    dw_ff = self.lr_ff * (y_next * x_t)
 
         # 2) Dampened-Hebbian update for w_fb
         damp = self.alpha / (y_next + self.alpha)
 
-        match self.FBrule:
-            # contextual strengthening general (not only the experienced context, also novel)
-            case "dampened-anti-Hebbian":
-                # dw_fb = self.lr_fb * (damp * y_next * c_t)
-                dw_fb = self.lr_fb * (damp * self.fb_specificity @ c_t) * self.receives_context
-            case "Hebbian":
-                dw_fb = self.lr_fb * (y_next * self.fb_specificity @ c_t) * self.receives_context
+        if self.FB_plasticity:
+            match self.FBrule:
+                # contextual strengthening general (not only the experienced context, also novel)
+                case "dampened-anti-Hebbian":
+                    # dw_fb = self.lr_fb * (damp * y_next * c_t)
+                    dw_fb = self.lr_fb * (damp * self.fb_specificity @ c_t) * self.receives_context
+                case "Hebbian":
+                    dw_fb = self.lr_fb * (y_next * self.fb_specificity @ c_t) * self.receives_context
 
         # 3) Hebbian update for w_lat
-        dw_lat = self.lr_lat * (y_next * pv_t)
+        if self.lat_plasticity:
+            dw_lat = self.lr_lat * (y_next * pv_t)
 
         # 4) Hebbian update for W_pv
-        dw_W_pv = self.lr_pv * torch.outer(pv_t, x_t)
+        if self.pv_plasticity:
+            dw_W_pv = self.lr_pv * torch.outer(pv_t, x_t)
 
         # Apply updates
         self.w_ff += dw_ff
@@ -167,10 +196,10 @@ class CCNeuron(nn.Module):
         
         # Decay towards baseline
         if 0.0 < self.weight_decay < 1.0:
-            self.w_ff -= (self.w_ff - self.w_ff_baseline) * self.weight_decay
-            self.w_fb -= (self.w_fb - self.w_fb_baseline) * self.weight_decay
-            self.w_lat -= (self.w_lat - self.w_lat_baseline) * self.weight_decay
-            self.W_pv -= (self.W_pv - self.W_pv_baseline) * self.weight_decay
+            self.w_ff -= (self.w_ff - self.w_ff_baseline) * self.weight_decay * self.FF_plasticity
+            self.w_fb -= (self.w_fb - self.w_fb_baseline) * self.weight_decay * self.FB_plasticity
+            self.w_lat -= (self.w_lat - self.w_lat_baseline) * self.weight_decay * self.lat_plasticity
+            self.W_pv -= (self.W_pv - self.W_pv_baseline) * self.weight_decay * self.pv_plasticity
         
         # Ensure non-negativity of weights
         self.w_ff = nonnegative(self.w_ff)

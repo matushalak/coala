@@ -54,32 +54,55 @@ def visualize_experiment_results(DF:DataFrame, STIMULI:dict[str, tuple[torch.Ten
     long_df = wide_to_long(DF)
     # DF.to_csv(os.path.join(save_path, f"experiment_results_wide_{name}.csv"), index=False)   
     # long_df.to_csv(os.path.join(save_path, f"experiment_results_long_{name}.csv"), index=False)
-    panel_a_name = f"{name}panel_A" if name is not None else "panel_A"
-    visualize_naive_expert_results(
-        long_df,
-        STIMULI=STIMULI,
-        save_path=save_path,
-        name=name,
-        include_novel_no_context=include_novel_no_context,
-        xlim=xlim
-    )
-    visualize_naive_expert_results(
-        long_df,
-        STIMULI=STIMULI,
-        save_path=save_path,
-        name=panel_a_name,
-        full_plots=False,
-        include_novel_no_context=include_novel_no_context,
-        xlim=xlim
-    )
-    visualize_novel_condition_quickplot(
-        long_df,
-        STIMULI=STIMULI,
-        save_path=save_path,
-        name=name,
-        include_novel_no_context=include_novel_no_context,
-        xlim=xlim,
-    )
+    if "experiment_series" in long_df.columns:
+        series_names = long_df["experiment_series"].dropna().unique().tolist()
+    else:
+        series_names = []
+
+    if not series_names:
+        series_names = [None]
+
+    for idx, series_name in enumerate(series_names):
+        series_df = long_df if series_name is None else long_df.loc[long_df["experiment_series"].eq(series_name)].copy()
+        if series_df.empty:
+            continue
+
+        if idx == 0:
+            name_suffix = ""
+        else:
+            name_suffix = f"_{series_name}"
+
+        if name is None:
+            series_plot_name = name_suffix.removeprefix("_") or None
+        else:
+            series_plot_name = f"{name}{name_suffix}"
+        panel_a_name = f"{series_plot_name}panel_A" if series_plot_name is not None else "panel_A"
+
+        visualize_naive_expert_results(
+            series_df,
+            STIMULI=STIMULI,
+            save_path=save_path,
+            name=series_plot_name,
+            include_novel_no_context=include_novel_no_context,
+            xlim=xlim
+        )
+        visualize_naive_expert_results(
+            series_df,
+            STIMULI=STIMULI,
+            save_path=save_path,
+            name=panel_a_name,
+            full_plots=False,
+            include_novel_no_context=include_novel_no_context,
+            xlim=xlim
+        )
+        visualize_novel_condition_quickplot(
+            series_df,
+            STIMULI=STIMULI,
+            save_path=save_path,
+            name=series_plot_name,
+            include_novel_no_context=include_novel_no_context,
+            xlim=xlim,
+        )
     return long_df
 
 
@@ -477,6 +500,8 @@ def visualize_transition_panel(
 
     ordered_transitions = transition_order or TRANSITION_ORDER
     ordered_transitions = [name for name in ordered_transitions if name in long_dfs_by_transition]
+    if not ordered_transitions and transition_order is None:
+        ordered_transitions = list(long_dfs_by_transition)
     if not ordered_transitions:
         raise ValueError("No requested transitions were found in long_dfs_by_transition.")
 
@@ -704,9 +729,6 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         pair = STIMULI.get(name, default)
         return _to_np(pair[0]), _to_np(pair[1])
 
-    X1, C1 = _get_stim_pair("familiar")
-    X2, C2 = _get_stim_pair("novel")
-
     def _ensure_two_channels(arr: np.ndarray) -> np.ndarray:
         arr = np.asarray(arr, dtype=float)
         if arr.ndim == 1:
@@ -717,10 +739,33 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
             arr = arr[:, :2]
         return arr
 
-    X1 = _ensure_two_channels(X1)
-    C1 = _ensure_two_channels(C1)
-    X2 = _ensure_two_channels(X2)
-    C2 = _ensure_two_channels(C2)
+    def _extract_training_signal(value_col: str, index_col: str) -> tuple[np.ndarray, np.ndarray]:
+        if training_rows.empty or value_col not in training_rows.columns or index_col not in training_rows.columns:
+            return np.asarray([], dtype=float), np.zeros((0, 2), dtype=float)
+
+        pivot = (
+            training_rows[["step", index_col, value_col]]
+            .drop_duplicates()
+            .pivot(index="step", columns=index_col, values=value_col)
+            .sort_index()
+        )
+        if pivot.empty:
+            return np.asarray([], dtype=float), np.zeros((0, 2), dtype=float)
+
+        pivot = pivot.reindex(columns=[0, 1], fill_value=0.0)
+        return pivot.index.to_numpy(dtype=float), _ensure_two_channels(pivot.to_numpy(dtype=float))
+
+    training_steps, training_X = _extract_training_signal("x_value", "x_index")
+    _, training_C = _extract_training_signal("c_value", "c_index")
+    if training_steps.size == 0:
+        fallback_X, fallback_C = _get_stim_pair("familiar")
+        training_X = _ensure_two_channels(fallback_X)
+        training_C = _ensure_two_channels(fallback_C)
+        training_steps = np.arange(training_X.shape[0], dtype=float)
+
+    is_occluded_only_training = training_X.size > 0 and np.allclose(training_X, 0.0)
+    training_label = "(O, C1)" if is_occluded_only_training else "(X1, C1)"
+    training_title = f"Training input/context {training_label}"
 
     activity_layout = [(condition, phase) for condition in conditions for phase in phases]
     stim_windows = {
@@ -815,12 +860,11 @@ def visualize_naive_expert_results(long_df:DataFrame, STIMULI:dict[str, tuple[to
         )
 
     def plot_training_activity(ax_grid, _):
-        step_familiar = np.arange(X1.shape[0])
-        for idx in range(min(2, X1.shape[1])):
-            ax_grid[0, 0].plot(step_familiar, X1[:, idx], color=x_colors[idx], lw=1.5, label=f"x_{idx}")
-        for idx in range(min(2, C1.shape[1])):
-            ax_grid[0, 0].plot(step_familiar, C1[:, idx], color=c_colors[idx], linestyle='--', lw=1.5, label=f"c_{idx}")
-        ax_grid[0, 0].set_title("Training (familiar) input/context (X1, C1)")
+        for idx in range(min(2, training_X.shape[1])):
+            ax_grid[0, 0].plot(training_steps, training_X[:, idx], color=x_colors[idx], lw=1.5, label=f"x_{idx}")
+        for idx in range(min(2, training_C.shape[1])):
+            ax_grid[0, 0].plot(training_steps, training_C[:, idx], color=c_colors[idx], linestyle='--', lw=1.5, label=f"c_{idx}")
+        ax_grid[0, 0].set_title(training_title)
         ax_grid[0, 0].set_xlabel("")
         _style_axis_fonts(ax_grid[0, 0])
         ax_grid[0, 0].tick_params(labelbottom=False)
@@ -992,7 +1036,7 @@ def wide_to_long(DF:DataFrame) -> DataFrame:
         return pd.DataFrame(columns=[
             "step", "y", "x_index", "x_value", "w_ff",
             "c_index", "c_value", "w_fb", "pv_index", "pv_value",
-            "w_lat", "W_pv", "image_type", "condition", "experiment_phase", "seed",
+            "w_lat", "W_pv", "image_type", "condition", "experiment_phase", "experiment_series", "seed",
         ])
 
     nx = len(x_idx)
@@ -1046,6 +1090,8 @@ def wide_to_long(DF:DataFrame) -> DataFrame:
 
     if "seed" in DF.columns:
         long_df["seed"] = np.repeat(DF["seed"].to_numpy(), rep)
+    if "experiment_series" in DF.columns:
+        long_df["experiment_series"] = np.repeat(DF["experiment_series"].astype(str).to_numpy(), rep)
 
     if "condition" in DF.columns:
         cond = DF["condition"].astype(str).to_numpy()
@@ -1070,6 +1116,6 @@ def wide_to_long(DF:DataFrame) -> DataFrame:
     result_cols = [
         "step", "y", "x_index", "x_value", "w_ff",
         "c_index", "c_value", "w_fb", "pv_index", "pv_value",
-        "w_lat", "W_pv", "image_type", "condition", "experiment_phase", "seed",
+        "w_lat", "W_pv", "image_type", "condition", "experiment_phase", "experiment_series", "seed",
     ]
     return long_df[[c for c in result_cols if c in long_df.columns]]
