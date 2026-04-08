@@ -5,6 +5,7 @@ from cc.ml.pretraining.JEPAmodel import JEPA
 from cc.ml.pretraining.LeJEPAmodel import LeJEPA
 from cc.ml.pretraining.MAEmodel import MAE
 from cc.ml.pretraining.common import (
+    PREDICTOR_MODES,
     default_reconstruction_head_config,
     normalize_model_config,
     normalize_predictor_config,
@@ -101,39 +102,30 @@ def test_jepa_smoke_and_logs_exact_configs():
     imgs = torch.randn(2, 1, 32, 32)
     model_config = _predictive_backbone_config()
     predictor_config = normalize_predictor_config({"predictor_dim": 32, "depth": 1, "num_heads": 4})
-    expected_head_config = normalize_reconstruction_head_config(
-        default_reconstruction_head_config(
-            family="ConvNet",
-            input_shape=(32, 32),
-            output_shape=(32, 32),
-            feature_dim=8,
-            num_output_channels=1,
+    for predictor_mode in PREDICTOR_MODES:
+        model = JEPA(
+            num_filters=8,
+            lr=1e-3,
+            mask_ratio=0.5,
+            patch_size=4,
+            masked_loss_weight=1.0,
+            num_input_channels=1,
+            image_size=32,
+            model_config=model_config,
+            predictor_config=predictor_config,
+            predictor_mode=predictor_mode,
         )
-    )
-    model = JEPA(
-        num_filters=8,
-        lr=1e-3,
-        mask_ratio=0.5,
-        patch_size=4,
-        masked_loss_weight=1.0,
-        num_input_channels=1,
-        image_size=32,
-        model_config=model_config,
-        predictor_config=predictor_config,
-        reconstruction_head_family="ConvNet",
-    )
 
-    distill_loss, recon_loss = model(imgs)
-    _, _, _, recon, predicted_latents, keep_masks = model._jepa_outputs(imgs)
+        distill_loss, metrics = model(imgs, return_metrics=True)
+        _, _, _, predicted_latents, keep_masks = model._jepa_outputs(imgs)
 
-    assert torch.isfinite(distill_loss)
-    assert torch.isfinite(recon_loss)
-    assert recon.shape == imgs.shape
-    assert predicted_latents["feat0"].shape[-2:] == (32, 32)
-    assert keep_masks["mask0"].shape[-2:] == (32, 32)
-    assert dict(model.hparams)["model_config"] == model_config
-    assert dict(model.hparams)["predictor_config"] == predictor_config
-    assert dict(model.hparams)["reconstruction_head_config"] == expected_head_config
+        assert torch.isfinite(distill_loss)
+        assert predicted_latents["feat0"].shape[-2:] == (32, 32)
+        assert keep_masks["mask0"].shape[-2:] == (32, 32)
+        assert "feat0_loss" in metrics
+        assert dict(model.hparams)["model_config"] == model_config
+        assert dict(model.hparams)["predictor_config"] == predictor_config
+        assert dict(model.hparams)["predictor_mode"] == predictor_mode
 
 
 def test_lejepa_smoke_and_logs_exact_configs():
@@ -151,6 +143,7 @@ def test_lejepa_smoke_and_logs_exact_configs():
         image_size=32,
         model_config=model_config,
         predictor_config=predictor_config,
+        predictor_mode="decoder",
     )
 
     total_loss, distill_loss, sigreg_loss, metrics = model(imgs)
@@ -162,6 +155,7 @@ def test_lejepa_smoke_and_logs_exact_configs():
     assert "feat0_sigreg" in metrics
     assert dict(model.hparams)["model_config"] == model_config
     assert dict(model.hparams)["predictor_config"] == predictor_config
+    assert dict(model.hparams)["predictor_mode"] == "decoder"
 
 
 def test_coala_smoke_and_logs_exact_configs():
@@ -169,15 +163,6 @@ def test_coala_smoke_and_logs_exact_configs():
     imgs = torch.randn(2, 1, 32, 32)
     model_config = _predictive_backbone_config()
     predictor_config = normalize_predictor_config({"predictor_dim": 32, "depth": 1, "num_heads": 4})
-    expected_head_config = normalize_reconstruction_head_config(
-        default_reconstruction_head_config(
-            family="ConvNeXt",
-            input_shape=(32, 32),
-            output_shape=(32, 32),
-            feature_dim=8,
-            num_output_channels=1,
-        )
-    )
     model = COALA(
         num_filters=8,
         lr=1e-3,
@@ -188,23 +173,21 @@ def test_coala_smoke_and_logs_exact_configs():
         image_size=32,
         model_config=model_config,
         predictor_config=predictor_config,
-        reconstruction_head_family="ConvNeXt",
     )
 
-    total_loss, distill_loss, sigreg_loss, recon_loss, metrics = model(imgs)
-    _, _, _, _, _, recon, keep_masks = model._jepa_outputs(imgs)
+    total_loss, distill_loss, sigreg_loss, metrics = model(imgs)
+    _, _, _, _, coala_latents, keep_masks = model._jepa_outputs(imgs)
 
     assert torch.isfinite(total_loss)
     assert torch.isfinite(distill_loss)
     assert torch.isfinite(sigreg_loss)
-    assert torch.isfinite(recon_loss)
-    assert recon.shape == imgs.shape
+    assert coala_latents["feat0"].shape[-2:] == (32, 32)
     assert keep_masks["mask0"].shape[-2:] == (32, 32)
     assert "feat0_loss" in metrics
     assert "feat0_sigreg" in metrics
     assert dict(model.hparams)["model_config"] == model_config
     assert dict(model.hparams)["predictor_config"] == predictor_config
-    assert dict(model.hparams)["reconstruction_head_config"] == expected_head_config
+    assert dict(model.hparams)["predictor_mode"] == "predictor+decoder"
 
 
 def test_rgb32_pretraining_smoke():
@@ -239,8 +222,7 @@ def test_rgb32_pretraining_smoke():
         model_config=model_config,
         predictor_config=predictor_config,
     )
-    total_loss, distill_loss, sigreg_loss, recon_loss, _ = coala(imgs)
+    total_loss, distill_loss, sigreg_loss, _ = coala(imgs)
     assert torch.isfinite(total_loss)
     assert torch.isfinite(distill_loss)
     assert torch.isfinite(sigreg_loss)
-    assert torch.isfinite(recon_loss)

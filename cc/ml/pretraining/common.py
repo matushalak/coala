@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 
 import torch
 import torch.nn as nn
@@ -8,6 +9,8 @@ import torch.nn as nn
 from cc.ml.architecture import HierarchicalAutoencoder, PredictiveHierarchicalAutoencoder
 from cc.ml.architecture.modules import resolve_module_family
 from cc.ml.architecture.modules.utils import sorted_stage_keys
+
+PREDICTOR_MODES = ("decoder", "predictor", "predictor+decoder")
 
 
 def _default_num_heads(dim: int) -> int:
@@ -147,6 +150,62 @@ def instantiate_autoencoder(model_config: dict, *, predictive: bool, predictor_c
     if predictive:
         return PredictiveHierarchicalAutoencoder(**model_config, P_kwargs=normalize_predictor_config(predictor_config))
     return HierarchicalAutoencoder(**model_config)
+
+
+def combine_feature_latents(
+    left: dict[str, torch.Tensor],
+    right: dict[str, torch.Tensor],
+    feature_names: list[str],
+) -> dict[str, torch.Tensor]:
+    return {name: left[name] + right[name] for name in feature_names}
+
+
+def select_prediction_latents(
+    predictor_mode: str,
+    *,
+    decoder_latents: dict[str, torch.Tensor],
+    predictor_latents: dict[str, torch.Tensor],
+    feature_names: list[str],
+) -> dict[str, torch.Tensor]:
+    assert predictor_mode in PREDICTOR_MODES
+    if predictor_mode == "decoder":
+        return {name: decoder_latents[name] for name in feature_names}
+    if predictor_mode == "predictor":
+        return {name: predictor_latents[name] for name in feature_names}
+    return combine_feature_latents(decoder_latents, predictor_latents, feature_names)
+
+
+def configure_adamw_with_warmup_and_cosine_decay(module) -> torch.optim.Optimizer | dict:
+    optimizer = torch.optim.AdamW(
+        module.parameters(),
+        lr=module.hparams.lr,
+        betas=(0.9, 0.95),
+        weight_decay=module.hparams.weight_decay,
+    )
+
+    trainer = getattr(module, "_trainer", None)
+    if trainer is None:
+        return optimizer
+
+    max_epochs = int(trainer.max_epochs)
+    assert max_epochs > 0
+    warmup_epochs = int(module.hparams.warmup_epochs)
+    assert 0 <= warmup_epochs <= max_epochs
+
+    def lr_lambda(epoch: int) -> float:
+        warmup = (epoch + 1) / (warmup_epochs + 1e-8)
+        cosine = 0.5 * (math.cos(epoch / max_epochs * math.pi) + 1.0)
+        return min(warmup, cosine)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    return {
+        "optimizer": optimizer,
+        "lr_scheduler": {
+            "scheduler": scheduler,
+            "interval": "epoch",
+            "frequency": 1,
+        },
+    }
 
 
 def feature_names_from_latents(latents: dict[str, torch.Tensor]) -> list[str]:

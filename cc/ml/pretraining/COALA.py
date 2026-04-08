@@ -12,13 +12,14 @@ from cc.datasets import get_dataloaders
 from cc.ml import COALA_logs, dataset_log_dir
 from cc.ml.masking import add_masking_arguments, clear_mask_bank_caches, masking_kwargs_from_args, sample_keep_mask
 from cc.ml.pretraining.common import (
-    GenerativeHead,
+    PREDICTOR_MODES,
+    combine_feature_latents,
+    configure_adamw_with_warmup_and_cosine_decay,
     default_model_config,
-    default_reconstruction_head_config,
     instantiate_autoencoder,
     normalize_model_config,
     normalize_predictor_config,
-    normalize_reconstruction_head_config,
+    select_prediction_latents,
 )
 from cc.utils import ExponentialMovingAverage
 
@@ -64,6 +65,7 @@ class COALA(pl.LightningModule):
         mask_ratio: float,
         patch_size: int,
         masked_loss_weight: float,
+        batch_size: int = 128,
         num_input_channels: int = 1,
         image_size: int = 28,
         decoder_densify_mode: str = "random",
@@ -72,13 +74,14 @@ class COALA(pl.LightningModule):
         norm_type: str = "rmsnorm",
         denoise: bool = False,
         denoise_sigma: float = 1.0,
+        warmup_epochs: int = 0,
+        weight_decay: float = 0.0,
         noise_level: float | None = None,
         sigreg_loss_weight: float = 0.1,
         sigreg_max_samples: int = 1024,
-        reconstruction_head_family: str = "ViT",
         model_config: dict | None = None,
         predictor_config: dict | None = None,
-        reconstruction_head_config: dict | None = None,
+        predictor_mode: str = "predictor+decoder",
         masking_strategy: str = "random",
         multi_block_scale_min: float = 0.15,
         multi_block_scale_max: float = 0.2,
@@ -89,7 +92,7 @@ class COALA(pl.LightningModule):
         super().__init__()
         if noise_level is not None:
             denoise_sigma = noise_level
-        assert use_skip
+        assert predictor_mode in PREDICTOR_MODES
         if model_config is None:
             model_config = default_model_config(
                 image_size=image_size,
@@ -97,36 +100,16 @@ class COALA(pl.LightningModule):
                 num_filters=num_filters,
                 norm_type=norm_type,
                 decoder_densify_mode=decoder_densify_mode,
-                use_skip=True,
+                use_skip=use_skip,
                 upconv_method=upconv_method,
             )
         model_config = normalize_model_config(model_config)
-        model_config["D_kwargs"]["use_skip"] = True
         predictor_config = normalize_predictor_config(predictor_config)
 
         self.model = instantiate_autoencoder(model_config, predictive=True, predictor_config=predictor_config)
         self.feature_names = list(self.model.encoder.feature_names)
         self.teacher = ExponentialMovingAverage(self.model.encoder, decay=0.99).eval()
         self.sigreg = SIGReg(max_samples=sigreg_max_samples).eval()
-
-        if reconstruction_head_config is None:
-            reconstruction_head_config = default_reconstruction_head_config(
-                family=reconstruction_head_family,
-                input_shape=self.model.encoder.spatial_shapes[0],
-                output_shape=self.model.input_shape[1:],
-                feature_dim=self.model.encoder.feature_dims[0],
-                num_output_channels=self.model.input_shape[0],
-            )
-        reconstruction_head_config = normalize_reconstruction_head_config(reconstruction_head_config)
-        self.reconstruction_head = GenerativeHead(
-            family=reconstruction_head_config["family"],
-            in_channels=self.model.encoder.feature_dims[0],
-            input_spatial_shape=self.model.encoder.spatial_shapes[0],
-            output_spatial_shape=self.model.input_shape[1:],
-            num_output_channels=reconstruction_head_config["num_output_channels"],
-            kwargs=reconstruction_head_config["kwargs"],
-        )
-        self.reconstruction_feature = self.feature_names[0]
         self.save_hyperparameters(ignore=["noise_level"])
 
     def _mask(self, imgs: torch.Tensor) -> torch.BoolTensor:
@@ -172,17 +155,19 @@ class COALA(pl.LightningModule):
         teacher_latents = self.teacher(imgs, keep_mask=full_mask)
         clean_student_latents = self.model.encoder(imgs, keep_mask=full_mask)
         student_imgs = self._student_input(imgs, keep_mask)
-        decoder_latents, dirty_encoder_latents, predicted_latents = self.model(student_imgs, keep_mask=keep_mask)
-        coala_latents = {
-            feat_name: dirty_encoder_latents[feat_name] + predicted_latents[feat_name]
-            for feat_name in self.feature_names
-        }
-        recon = self.reconstruction_head(decoder_latents[self.reconstruction_feature])
+        decoder_latents, dirty_encoder_latents, predictor_latents = self.model(student_imgs, keep_mask=keep_mask)
+        predicted_latents = select_prediction_latents(
+            self.hparams.predictor_mode,
+            decoder_latents=decoder_latents,
+            predictor_latents=predictor_latents,
+            feature_names=self.feature_names,
+        )
+        coala_latents = combine_feature_latents(dirty_encoder_latents, predicted_latents, self.feature_names)
         keep_masks = {
             feat_name.replace("feat", "mask"): dirty_encoder_latents[feat_name.replace("feat", "mask")]
             for feat_name in self.feature_names
         }
-        return student_imgs, keep_mask, clean_student_latents, teacher_latents, coala_latents, recon, keep_masks
+        return student_imgs, keep_mask, clean_student_latents, teacher_latents, coala_latents, keep_masks
 
     def self_distillation_loss(self, predictor_latents, clean_latents, keep_masks):
         per_scale = []
@@ -213,26 +198,17 @@ class COALA(pl.LightningModule):
             metrics[f"{feat_name}_sigreg"] = scale_sigreg
         return torch.stack(per_scale).mean(), metrics
 
-    def _reconstruction_loss(self, recon: torch.Tensor, imgs: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
-        per_pixel_mse = (recon - imgs).pow(2).mean(dim=1)
-        masked_pixels = (~keep_mask.squeeze(1)).to(dtype=per_pixel_mse.dtype)
-        weights = torch.ones_like(per_pixel_mse) + masked_pixels * (self.hparams.masked_loss_weight - 1.0)
-        weighted = per_pixel_mse * weights
-        per_image = weighted.sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1e-8)
-        return per_image.mean()
-
     def forward(self, imgs: torch.Tensor, keep_mask: torch.BoolTensor | None = None):
-        _, keep_mask, clean_student_latents, teacher_latents, coala_latents, recon, keep_masks = self._jepa_outputs(
+        _, _, clean_student_latents, teacher_latents, coala_latents, keep_masks = self._jepa_outputs(
             imgs, keep_mask=keep_mask
         )
         distill_loss, distill_metrics = self.self_distillation_loss(coala_latents, teacher_latents, keep_masks)
         sigreg_loss, sigreg_metrics = self.sigreg_loss(clean_student_latents)
-        recon_loss = self._reconstruction_loss(recon, imgs, keep_mask)
-        total_loss = distill_loss + self.hparams.sigreg_loss_weight * sigreg_loss + 0.5 * self.hparams.sigreg_loss_weight * recon_loss
+        total_loss = distill_loss + self.hparams.sigreg_loss_weight * sigreg_loss
         metrics = {}
         metrics.update(distill_metrics)
         metrics.update(sigreg_metrics)
-        return total_loss, distill_loss, sigreg_loss, recon_loss, metrics
+        return total_loss, distill_loss, sigreg_loss, metrics
 
     @torch.no_grad()
     def _project_pair_to_rgb(self, teacher_latents: torch.Tensor, student_latents: torch.Tensor):
@@ -292,7 +268,7 @@ class COALA(pl.LightningModule):
 
     @torch.no_grad()
     def feature_visualizations(self, imgs: torch.Tensor, keep_mask: torch.BoolTensor | None = None):
-        student_imgs, keep_mask, _, teacher_latents, coala_latents, _, _ = self._jepa_outputs(imgs, keep_mask=keep_mask)
+        student_imgs, keep_mask, _, teacher_latents, coala_latents, _ = self._jepa_outputs(imgs, keep_mask=keep_mask)
         visualizations = {
             "context": torch.cat(
                 [
@@ -317,7 +293,7 @@ class COALA(pl.LightningModule):
         return visualizations
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+        return configure_adamw_with_warmup_and_cosine_decay(self)
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
@@ -328,28 +304,25 @@ class COALA(pl.LightningModule):
             self.log(f"{prefix}_{name}", value, on_step=on_step, on_epoch=on_epoch)
 
     def training_step(self, batch, batch_idx):
-        total_loss, distill_loss, sigreg_loss, recon_loss, metrics = self.forward(batch[0])
+        total_loss, distill_loss, sigreg_loss, metrics = self.forward(batch[0])
         self.log("train_total_loss", total_loss, on_step=False, on_epoch=True)
         self.log("train_distillation_loss", distill_loss, on_step=False, on_epoch=True)
         self.log("train_sigreg_loss", sigreg_loss, on_step=False, on_epoch=True)
-        self.log("train_reconstruction_loss", recon_loss, on_step=False, on_epoch=True)
         self._log_metrics("train", metrics, on_step=False, on_epoch=True)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        total_loss, distill_loss, sigreg_loss, recon_loss, metrics = self.forward(batch[0])
+        total_loss, distill_loss, sigreg_loss, metrics = self.forward(batch[0])
         self.log("val_total_loss", total_loss, on_step=False, on_epoch=True)
         self.log("val_distillation_loss", distill_loss, on_step=False, on_epoch=True)
         self.log("val_sigreg_loss", sigreg_loss, on_step=False, on_epoch=True)
-        self.log("val_reconstruction_loss", recon_loss, on_step=False, on_epoch=True)
         self._log_metrics("val", metrics, on_step=False, on_epoch=True)
 
     def test_step(self, batch, batch_idx):
-        total_loss, distill_loss, sigreg_loss, recon_loss, metrics = self.forward(batch[0])
+        total_loss, distill_loss, sigreg_loss, metrics = self.forward(batch[0])
         self.log("test_total_loss", total_loss, on_step=False, on_epoch=True)
         self.log("test_distillation_loss", distill_loss, on_step=False, on_epoch=True)
         self.log("test_sigreg_loss", sigreg_loss, on_step=False, on_epoch=True)
-        self.log("test_reconstruction_loss", recon_loss, on_step=False, on_epoch=True)
         self._log_metrics("test", metrics, on_step=False, on_epoch=True)
 
 
@@ -409,19 +382,22 @@ def train_coala(args):
     model = COALA(
         num_filters=args.num_filters,
         lr=args.lr,
+        batch_size=args.batch_size,
         mask_ratio=args.mask_ratio,
         patch_size=args.patch_size,
         masked_loss_weight=args.masked_loss_weight,
         num_input_channels=args.num_input_channels,
         image_size=args.image_size,
         decoder_densify_mode=args.decoder_densify_mode,
-        use_skip=True,
+        use_skip=args.use_skip,
         upconv_method=args.upconv_method,
         norm_type=args.norm_type,
         denoise=args.denoise,
+        warmup_epochs=args.warmup_epochs,
+        weight_decay=args.weight_decay,
         sigreg_loss_weight=args.sigreg_loss_weight,
         sigreg_max_samples=args.sigreg_max_samples,
-        reconstruction_head_family=args.reconstruction_head_family,
+        predictor_mode=args.predictor_mode,
         **masking_kwargs_from_args(args),
     )
     trainer.fit(model, train_loader, val_loader)
@@ -433,6 +409,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--epochs", default=21, type=int)
     parser.add_argument("--lr", default=1e-3, type=float)
+    parser.add_argument("--warmup_epochs", default=0, type=int)
+    parser.add_argument("--weight_decay", default=0.0, type=float)
     parser.add_argument("--batch_size", default=128, type=int)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--denoise", action="store_true")
@@ -448,7 +426,9 @@ if __name__ == "__main__":
     parser.add_argument("--decoder_densify_mode", default="random", choices=("random", "token", "zero"), type=str)
     parser.add_argument("--upconv_method", default="upsample+conv", choices=("transposed_conv", "upsample+conv"), type=str)
     parser.add_argument("--norm_type", default="rmsnorm", choices=("layernorm", "rmsnorm"), type=str)
-    parser.add_argument("--reconstruction_head_family", default="ViT", choices=("ViT", "ConvNet", "ConvNeXt"), type=str)
+    parser.add_argument("--predictor_mode", default="predictor+decoder", choices=PREDICTOR_MODES, type=str)
+    parser.add_argument("--no_skip", dest="use_skip", action="store_false")
+    parser.set_defaults(use_skip=True)
     parser.add_argument("--data_dir", default=DATADIR, type=str)
     parser.add_argument("--num_workers", default=10, type=int)
     parser.add_argument("--log_dir", default=COALA_logs, type=str)

@@ -11,6 +11,7 @@ from cc.datasets import get_dataloaders
 from cc.ml import MAE_logs, dataset_log_dir
 from cc.ml.masking import add_masking_arguments, clear_mask_bank_caches, masking_kwargs_from_args, sample_keep_mask
 from cc.ml.pretraining.common import (
+    configure_adamw_with_warmup_and_cosine_decay,
     GenerativeHead,
     default_model_config,
     default_reconstruction_head_config,
@@ -29,6 +30,7 @@ class MAE(pl.LightningModule):
         mask_ratio: float,
         patch_size: int,
         masked_loss_weight: float,
+        batch_size: int = 128,
         num_input_channels: int = 1,
         image_size: int = 28,
         decoder_densify_mode: str = "random",
@@ -37,6 +39,8 @@ class MAE(pl.LightningModule):
         norm_type: str = "rmsnorm",
         denoise: bool = False,
         denoise_sigma: float = 1.0,
+        warmup_epochs: int = 0,
+        weight_decay: float = 0.0,
         reconstruction_head_family: str = "ViT",
         model_config: dict | None = None,
         reconstruction_head_config: dict | None = None,
@@ -129,7 +133,7 @@ class MAE(pl.LightningModule):
         return self._reconstruction_loss(recon, imgs, keep_mask)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+        return configure_adamw_with_warmup_and_cosine_decay(self)
 
     def training_step(self, batch, batch_idx):
         loss = self.forward(batch[0])
@@ -205,6 +209,7 @@ def train_mae(args):
     model = MAE(
         num_filters=args.num_filters,
         lr=args.lr,
+        batch_size=args.batch_size,
         mask_ratio=args.mask_ratio,
         patch_size=args.patch_size,
         masked_loss_weight=args.masked_loss_weight,
@@ -215,6 +220,8 @@ def train_mae(args):
         upconv_method=args.upconv_method,
         norm_type=args.norm_type,
         denoise=args.denoise,
+        warmup_epochs=args.warmup_epochs,
+        weight_decay=args.weight_decay,
         reconstruction_head_family=args.reconstruction_head_family,
         **masking_kwargs_from_args(args),
     )
@@ -227,13 +234,14 @@ def train_mae(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--epochs", default=21, type=int)
-    parser.add_argument("--lr", default=1e-3, type=float)
+    parser.add_argument("--lr", default=1.5e-3, type=float)
+    parser.add_argument("--warmup_epochs", default=0, type=int)
+    parser.add_argument("--weight_decay", default=0.0, type=float)
     parser.add_argument("--batch_size", default=128, type=int)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--denoise", action="store_true")
-    parser.set_defaults(denoise=True)
     add_masking_arguments(parser)
-    parser.add_argument("--masked_loss_weight", default=4.0, type=float)
+    parser.add_argument("--masked_loss_weight", default=1.0, type=float)
     parser.add_argument("--num_filters", default=32, type=int)
     parser.add_argument("--num_input_channels", default=1, type=int)
     parser.add_argument("--image_size", default=28, type=int)
@@ -244,7 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_skip", action="store_true")
     parser.add_argument("--reconstruction_head_family", default="ConvNet", choices=("ViT", "ConvNet", "ConvNeXt"), type=str)
     parser.add_argument("--data_dir", default=DATADIR, type=str)
-    parser.add_argument("--num_workers", default=10, type=int)
+    parser.add_argument("--num_workers", default=0, type=int)
     parser.add_argument("--log_dir", default=MAE_logs, type=str)
     parser.add_argument("--progress_bar", action="store_true")
     train_mae(parser.parse_args())

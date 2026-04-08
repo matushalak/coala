@@ -91,15 +91,13 @@ class PredictiveHierarchicalAutoencoder(HierarchicalAutoencoder):
         P_kwargs: dict | None = None,
         input_shape: tuple[int, int, int] | None = None,
     ):
-        decoder_kwargs = {} if D_kwargs is None else dict(D_kwargs)
-        decoder_kwargs["use_skip"] = True
         super().__init__(
             n_layers=n_layers,
             d_layers=d_layers,
             E_kwargs=E_kwargs,
             layers_E=layers_E,
             layers_E_kwargs=layers_E_kwargs,
-            D_kwargs=decoder_kwargs,
+            D_kwargs=D_kwargs,
             layers_D=layers_D,
             layers_D_kwargs=layers_D_kwargs,
             input_shape=input_shape,
