@@ -15,10 +15,10 @@ from cc.ml.pretraining.common import (
     PREDICTOR_MODES,
     configure_adamw_with_warmup_and_cosine_decay,
     default_model_config,
-    instantiate_autoencoder,
+    instantiate_jepa_modules,
     normalize_model_config,
     normalize_predictor_config,
-    select_prediction_latents,
+    run_jepa_prediction,
 )
 from cc.utils import ExponentialMovingAverage
 
@@ -101,9 +101,13 @@ class LeJEPA(pl.LightningModule):
             )
         model_config = normalize_model_config(model_config)
         predictor_config = normalize_predictor_config(predictor_config)
-        self.model = instantiate_autoencoder(model_config, predictive=True, predictor_config=predictor_config)
-        self.feature_names = list(self.model.encoder.feature_names)
-        self.teacher = ExponentialMovingAverage(self.model.encoder, decay=0.99).eval()
+        self.encoder, self.decoder, self.predictor = instantiate_jepa_modules(
+            model_config,
+            predictor_mode=predictor_mode,
+            predictor_config=predictor_config,
+        )
+        self.feature_names = list(self.encoder.feature_names)
+        self.teacher = ExponentialMovingAverage(self.encoder, decay=0.99).eval()
         self.sigreg = SIGReg(max_samples=sigreg_max_samples).eval()
         self.save_hyperparameters()
 
@@ -148,14 +152,14 @@ class LeJEPA(pl.LightningModule):
             keep_mask = self._mask(imgs)
         full_mask = torch.ones_like(keep_mask, dtype=torch.bool)
         teacher_latents = self.teacher(imgs, keep_mask=full_mask)
-        clean_student_latents = self.model.encoder(imgs, keep_mask=full_mask)
+        clean_student_latents = self.encoder(imgs, keep_mask=full_mask)
         student_imgs = self._student_input(imgs, keep_mask)
-        decoder_latents, dirty_encoder_latents, predictor_latents = self.model(student_imgs, keep_mask=keep_mask)
-        predicted_latents = select_prediction_latents(
-            self.hparams.predictor_mode,
-            decoder_latents=decoder_latents,
-            predictor_latents=predictor_latents,
-            feature_names=self.feature_names,
+        dirty_encoder_latents = self.encoder(student_imgs, keep_mask=keep_mask)
+        predicted_latents, _, _ = run_jepa_prediction(
+            decoder=self.decoder,
+            predictor=self.predictor,
+            dirty_encoder_latents=dirty_encoder_latents,
+            predictor_mode=self.hparams.predictor_mode,
         )
         keep_masks = {name.replace("feat", "mask"): dirty_encoder_latents[name.replace("feat", "mask")] for name in self.feature_names}
         return student_imgs, keep_mask, clean_student_latents, teacher_latents, predicted_latents, keep_masks
@@ -288,7 +292,7 @@ class LeJEPA(pl.LightningModule):
 
     def optimizer_step(self, *args, **kwargs):
         super().optimizer_step(*args, **kwargs)
-        self.teacher.update(self.model.encoder)
+        self.teacher.update(self.encoder)
 
     def _log_metrics(self, prefix: str, metrics: dict[str, torch.Tensor], *, on_step: bool, on_epoch: bool):
         for name, value in metrics.items():

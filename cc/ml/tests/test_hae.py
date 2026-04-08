@@ -177,13 +177,66 @@ def test_predictive_hae_predictor_matches_encoder_shapes():
         ],
         D_kwargs={"densify_mode": "zero"},
         P_kwargs={"predictor_dim": 48, "depth": 1, "num_heads": 4},
+        predictor_mode="predictor",
         input_shape=(1, 32, 32),
     )
 
     x = torch.randn(2, 1, 32, 32)
-    decoded, encoded, predicted = model(x, keep_mask=_keep_mask(2, 32, 32))
+    outputs = model(x, keep_mask=_keep_mask(2, 32, 32))
+    encoded = outputs["encoder_latents"]
+    predicted = outputs["predicted_latents"]
 
     assert predicted["feat0"].shape == encoded["feat0"].shape
     assert predicted["feat1"].shape == encoded["feat1"].shape
     assert predicted["feat2"].shape == encoded["feat2"].shape
-    assert decoded["feat0"].shape == encoded["feat0"].shape
+    assert outputs["decoder_latents"] is None
+    assert outputs["predictor_latents"]["feat0"].shape == encoded["feat0"].shape
+
+
+def test_predictive_hae_decoder_mode_uses_no_predictor():
+    model = PredictiveHierarchicalAutoencoder(
+        n_layers=3,
+        d_layers=[16, 32, 64],
+        E_kwargs={"norm_type": "rmsnorm"},
+        layers_E="ConvNet",
+        layers_E_kwargs=[
+            {"depth": 1, "transition_kernel_size": 3, "transition_stride": 1, "transition_padding": 1},
+            {"depth": 1, "transition_kernel_size": 3, "transition_stride": 2, "transition_padding": 1},
+            {"depth": 1, "transition_kernel_size": 3, "transition_stride": 2, "transition_padding": 1},
+        ],
+        D_kwargs={"densify_mode": "zero", "use_skip": True},
+        predictor_mode="decoder",
+        input_shape=(1, 32, 32),
+    )
+
+    outputs = model(torch.randn(2, 1, 32, 32), keep_mask=_keep_mask(2, 32, 32))
+
+    assert model.predictor is None
+    assert outputs["predictor_latents"] is None
+    assert outputs["decoder_latents"]["feat0"].shape == outputs["encoder_latents"]["feat0"].shape
+    assert outputs["predicted_latents"]["feat0"].shape == outputs["encoder_latents"]["feat0"].shape
+
+
+def test_predictive_hae_predictor_plus_decoder_mode_feeds_decoder():
+    model = PredictiveHierarchicalAutoencoder(
+        n_layers=3,
+        d_layers=[16, 32, 64],
+        E_kwargs={"norm_type": "rmsnorm"},
+        layers_E="ConvNet",
+        layers_E_kwargs=[
+            {"depth": 1, "transition_kernel_size": 3, "transition_stride": 1, "transition_padding": 1},
+            {"depth": 1, "transition_kernel_size": 3, "transition_stride": 2, "transition_padding": 1},
+            {"depth": 1, "transition_kernel_size": 3, "transition_stride": 2, "transition_padding": 1},
+        ],
+        D_kwargs={"densify_mode": "zero", "use_skip": True},
+        P_kwargs={"predictor_dim": 48, "depth": 1, "num_heads": 4},
+        predictor_mode="predictor+decoder",
+        input_shape=(1, 32, 32),
+    )
+
+    outputs = model(torch.randn(2, 1, 32, 32), keep_mask=_keep_mask(2, 32, 32))
+
+    assert outputs["predictor_latents"] is not None
+    assert outputs["decoder_latents"] is not None
+    assert outputs["predicted_latents"]["feat0"].shape == outputs["encoder_latents"]["feat0"].shape
+    assert outputs["decoder_latents"]["feat0"].shape == outputs["encoder_latents"]["feat0"].shape

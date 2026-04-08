@@ -6,7 +6,11 @@ import math
 import torch
 import torch.nn as nn
 
-from cc.ml.architecture import HierarchicalAutoencoder, PredictiveHierarchicalAutoencoder
+from cc.ml.architecture import (
+    HierarchicalAutoencoder,
+    PredictiveHierarchicalAutoencoder,
+)
+from cc.ml.architecture.HAE import build_predictive_hae_modules
 from cc.ml.architecture.modules import resolve_module_family
 from cc.ml.architecture.modules.utils import sorted_stage_keys
 
@@ -152,27 +156,58 @@ def instantiate_autoencoder(model_config: dict, *, predictive: bool, predictor_c
     return HierarchicalAutoencoder(**model_config)
 
 
+def instantiate_jepa_modules(
+    model_config: dict,
+    *,
+    predictor_mode: str,
+    predictor_config: dict | None = None,
+):
+    assert predictor_mode in PREDICTOR_MODES
+    return build_predictive_hae_modules(
+        d_layers=list(model_config["d_layers"]),
+        predictor_mode=predictor_mode,
+        E_kwargs=model_config.get("E_kwargs"),
+        layers_E=model_config.get("layers_E", "ConvNet"),
+        layers_E_kwargs=model_config.get("layers_E_kwargs"),
+        D_kwargs=model_config.get("D_kwargs"),
+        layers_D=model_config.get("layers_D"),
+        layers_D_kwargs=model_config.get("layers_D_kwargs"),
+        P_kwargs=normalize_predictor_config(predictor_config),
+        input_shape=tuple(model_config["input_shape"]),
+    )
+
+
+def run_jepa_prediction(
+    *,
+    decoder,
+    predictor,
+    dirty_encoder_latents: dict[str, torch.Tensor],
+    predictor_mode: str,
+):
+    assert predictor_mode in PREDICTOR_MODES
+    predictor_latents = None
+    decoder_latents = None
+    if predictor_mode == "predictor":
+        assert predictor is not None
+        predictor_latents = predictor(dirty_encoder_latents)
+        predicted_latents = predictor_latents
+    elif predictor_mode == "decoder":
+        decoder_latents = decoder(dirty_encoder_latents)
+        predicted_latents = decoder_latents
+    else:
+        assert predictor is not None
+        predictor_latents = predictor(dirty_encoder_latents)
+        decoder_latents = decoder(dirty_encoder_latents, skip_latents=predictor_latents)
+        predicted_latents = decoder_latents
+    return predicted_latents, decoder_latents, predictor_latents
+
+
 def combine_feature_latents(
     left: dict[str, torch.Tensor],
     right: dict[str, torch.Tensor],
     feature_names: list[str],
 ) -> dict[str, torch.Tensor]:
     return {name: left[name] + right[name] for name in feature_names}
-
-
-def select_prediction_latents(
-    predictor_mode: str,
-    *,
-    decoder_latents: dict[str, torch.Tensor],
-    predictor_latents: dict[str, torch.Tensor],
-    feature_names: list[str],
-) -> dict[str, torch.Tensor]:
-    assert predictor_mode in PREDICTOR_MODES
-    if predictor_mode == "decoder":
-        return {name: decoder_latents[name] for name in feature_names}
-    if predictor_mode == "predictor":
-        return {name: predictor_latents[name] for name in feature_names}
-    return combine_feature_latents(decoder_latents, predictor_latents, feature_names)
 
 
 def configure_adamw_with_warmup_and_cosine_decay(module) -> torch.optim.Optimizer | dict:
