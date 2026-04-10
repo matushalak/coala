@@ -1,0 +1,18 @@
+name: coala
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - matplotlib
+  - numpy
+  - pandas
+  - pillow
+  - pytest
+  - seaborn
+  - pytorch
+  - torchvision
+  - pip
+  - pip:
+      - pytorch-lightning
+      - -e .

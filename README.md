@@ -1,11 +1,19 @@
-# ini
-Research code for theoretical neuroscience internship @Institute of Neuroinformatics (ETH/UZH) with prof. Katharina Wilmes
+# coala
+Self-contained repository for the former `cc/datasets` and `cc/ml` code.
 
-## Setup instructions
-Before running any code, it is important to run
-```
-cd /Users/matushalak/Documents/ini
-python3 -m pip install -e .
+## Layout
+- `coala/datasets`: dataset registry and dataset loaders
+- `coala/architecture`, `coala/heads`, `coala/pretraining`, `coala/logs`: model code and experiment assets
+- `coala/utils`: shared utility package
+- `tests`: repository-level tests targeting the `coala` package
 
+## Setup
+Create the environment and install the package in editable mode:
+
+```bash
+conda env create -f environment.yml
+conda activate coala
+python -m pip install -e .
 ```
-from the terminal, which will add contextual-contrasting as a library to your working environment and enable running any scripts in the cc "package".
+
+After that, imports such as `import coala`, `from coala.datasets import get_dataloaders`, and `from coala.pretraining import MAE` should resolve from this repository alone.
