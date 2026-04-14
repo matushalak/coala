@@ -1,18 +1,34 @@
 import argparse
+from math import prod
 from pathlib import Path
 import torch
 import torch.nn as nn
 from typing import Literal
 import re
 import warnings
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from coala.architecture.sparse_cnn_unet import SparseCNNEncoder, SparseCNNDecoder, SparseCNNUNet, SparseLocalStage, DenseLocalStage, DenseUpConv2d, SparseConv2d
-from coala import MAE_logs, Classifier_logs, FM_logs, Head_logs, LeJEPA_logs
+from coala.architecture.modules.ConvNet import ConvNetEncoderStage, ConvNetDecoderStage, UpConv2d
+from coala import DATADIR, MAE_logs, Classifier_logs, FM_logs, Head_logs, LeJEPA_logs, dataset_lightning_logs_dir
 from coala.utils import load_checkpoint
-from coala.heads.classifier import ClassifierHead
 from coala.architecture.cc_modules import CCModule
-from coala.datasets.msmnist import msmnist, visualize_msmnist_examples
+from coala.datasets import get_dataloaders
+from coala.datasets.masked_sequential import MaskedSequentialDataset
+from coala.datasets.registry import resolve_dataset_name
+from coala.pretraining.common import (
+    GenerativeHead,
+    default_model_config,
+    default_reconstruction_head_config,
+    instantiate_autoencoder,
+    normalize_model_config,
+    normalize_reconstruction_head_config,
+)
 from coala.visualize_activation_maps import create_activation_input_figure, create_activation_map_figure
+
+_LOG_DATASET_ALIASES = {
+    "cifar": "cifar10",
+}
 
 class COALANet(nn.Module):
     '''
@@ -28,7 +44,8 @@ class COALANet(nn.Module):
         encoder: SparseCNNEncoder,
         decoder: SparseCNNDecoder,
         head: nn.Module | None = None,
-        data_dims: tuple[int, int] = (1, 28, 28),
+        generative_head: nn.Module | None = None,
+        data_dims: tuple[int, int, int] = (1, 28, 28),
         config: dict | None = None,
         mode: Literal["discriminative", "generative"] = "discriminative",
     ):
@@ -41,7 +58,7 @@ class COALANet(nn.Module):
         self.generative_head: nn.Module | None = None
         
         # Load the pre-trained encoder, decoder, and head weights into the COALANet architecture
-        self._load_pretrained(encoder, decoder, head)
+        self._load_pretrained(encoder, decoder, head, generative_head=generative_head)
 
         # Define hierarchical recurrent layers
         self._define_hierarchical_layers()
@@ -122,15 +139,12 @@ class COALANet(nn.Module):
         self.head = self.discriminative_head if mode == "discriminative" else self.generative_head
 
     def _define_hierarchical_layers(self)->None:
-        ff_local_items = self._ordered_local_stages(self.ff_local_processing)
-        ff_conv_items = self._ordered_transition_modules(self.ff_downsample_convs)
-        fb_local_items = self._ordered_local_stages(self.fb_local_processing)
-        fb_upconv_items = self._ordered_transition_modules(self.fb_upsample_convs)
+        ff_stage_specs = self.ff_stage_specs
+        fb_stage_specs = self.fb_stage_specs
 
-        self.n_layers = len(ff_local_items) # number of hierarchical layers based on the feedforward local processing stages
-        assert self.n_layers == len(self.fb_local_processing), "Mismatch in number of feedforward and feedback local processing stages."
-        assert self.n_layers == len(self.ff_downsample_convs) == len(self.fb_upsample_convs) + 1, "There should be one more set of FF weights (input->V1) than FB weights."
-        spatial_dims = [self._infer_stage_spatial_dim(stage) for _, stage in ff_local_items]
+        self.n_layers = len(ff_stage_specs)
+        assert self.n_layers == len(fb_stage_specs), "Mismatch in number of feedforward and feedback stages."
+        spatial_dims = [spec["spatial_dim"] for spec in ff_stage_specs]
         
         # NOTE: slower time constants deeper in network
         time_constants = [0.05, 0.04, 0.03, 0.02][: self.n_layers]
@@ -142,14 +156,10 @@ class COALANet(nn.Module):
 
         self.cc_layers = nn.ModuleList()
         for il, spatial_dim in enumerate(spatial_dims):
-            # Bottom-up FF input from layer below
-            _, FF_conv = ff_conv_items[il]
-            _, FF_local = ff_local_items[il]
-            FF_conv = FF_Conv2d(conv=FF_conv, local_processing=FF_local)
-            # Top-down FB context from layer above (if exists). Top layer has no feedback source.
-            _, FB_local = fb_local_items[il]
-            FB_upconv = fb_upconv_items[il][1] if il < len(fb_upconv_items) else None
-            FB_conv = FB_Conv2d(upconv=FB_upconv, local_processing=FB_local)
+            ff_spec = ff_stage_specs[il]
+            fb_spec = fb_stage_specs[il]
+            FF_conv = FF_Conv2d(conv=ff_spec["transition"], local_processing=ff_spec["local_processing"])
+            FB_conv = FB_Conv2d(upconv=fb_spec["transition"], local_processing=fb_spec["local_processing"])
             layer = CCModule(spatial_dim, FF_conv, FB_conv, 
                              time_alpha=time_constants[il], 
                              LAT_ksize=lateral_inhibition_kernels[il])
@@ -178,41 +188,106 @@ class COALANet(nn.Module):
         modules: dict[str, nn.Module],
     ) -> list[tuple[str, nn.Module]]:
         return sorted(modules.items(), key=lambda item: self._stage_numeric_suffix(item[0]), reverse=True)
+
+    def _extract_modular_stage_specs(
+        self,
+        encoder: nn.Module,
+        decoder: nn.Module,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+        if not (hasattr(encoder, "stages") and hasattr(decoder, "stages")):
+            return None
+
+        ff_stage_specs = []
+        for stage in encoder.stages:
+            assert isinstance(stage, ConvNetEncoderStage), f"Unsupported encoder stage type: {type(stage)!r}"
+            ff_stage_specs.append(
+                {
+                    "spatial_dim": tuple(stage.output_spatial_shape),
+                    "transition": stage.transition,
+                    "local_processing": stage.local_stage,
+                }
+            )
+
+        fb_stage_specs = []
+        for stage in reversed(decoder.stages):
+            assert isinstance(stage, ConvNetDecoderStage), f"Unsupported decoder stage type: {type(stage)!r}"
+            fb_stage_specs.append(
+                {
+                    "spatial_dim": tuple(stage.output_spatial_shape),
+                    "transition": stage.transition,
+                    "local_processing": stage.local_stage,
+                }
+            )
+
+        return ff_stage_specs, fb_stage_specs
+
+    def _extract_legacy_stage_specs(
+        self,
+        encoder: SparseCNNEncoder,
+        decoder: SparseCNNDecoder,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        ff_local_processing = {}
+        ff_downsample_convs = {}
+        for name, module in encoder.named_modules():
+            if isinstance(module, SparseLocalStage):
+                ff_local_processing[name] = module
+            elif isinstance(module, nn.Conv2d) and (module.stride == (2, 2) or "down" in name):
+                ff_downsample_convs[name] = module
+
+        fb_local_processing = {}
+        fb_upsample_convs = {}
+        for name, module in decoder.named_modules():
+            if isinstance(module, DenseLocalStage):
+                fb_local_processing[name] = module
+            elif isinstance(module, (DenseUpConv2d, nn.ConvTranspose2d)) and (module.stride == (2, 2) or "up" in name):
+                fb_upsample_convs[name] = module
+
+        ff_local_items = self._ordered_local_stages(ff_local_processing)
+        ff_conv_items = self._ordered_transition_modules(ff_downsample_convs)
+        fb_local_items = self._ordered_local_stages(fb_local_processing)
+        fb_upconv_items = self._ordered_transition_modules(fb_upsample_convs)
+
+        assert len(ff_local_items) == len(ff_conv_items), "Legacy encoder stages are not aligned."
+        assert len(fb_local_items) == len(ff_local_items), "Legacy decoder stages are not aligned."
+
+        ff_stage_specs = []
+        for (_, local_stage), (_, transition) in zip(ff_local_items, ff_conv_items):
+            ff_stage_specs.append(
+                {
+                    "spatial_dim": self._infer_stage_spatial_dim(local_stage),
+                    "transition": transition,
+                    "local_processing": local_stage,
+                }
+            )
+
+        fb_stage_specs = []
+        for index, (_, local_stage) in enumerate(fb_local_items):
+            transition = fb_upconv_items[index][1] if index < len(fb_upconv_items) else None
+            fb_stage_specs.append(
+                {
+                    "spatial_dim": self._infer_stage_spatial_dim(local_stage),
+                    "transition": transition,
+                    "local_processing": local_stage,
+                }
+            )
+        return ff_stage_specs, fb_stage_specs
         
     def _load_pretrained(self, encoder:SparseCNNEncoder, decoder:SparseCNNDecoder, head:nn.Module | None,
+                         generative_head:nn.Module | None = None,
                          freeze_encoder:bool = True, freeze_decoder:bool = True, freeze_head:bool = True)->None:
-        # Extract feedforward (encoder) weights
-        encoder = encoder
         if freeze_encoder:
             for param in encoder.parameters():
                 param.requires_grad = False
             encoder.eval()
-        self.ff_local_processing = {}
-        self.ff_downsample_convs = {}
-        
-        for name, module in (encoder.named_modules()):
-            if isinstance(module, SparseLocalStage):
-                self.ff_local_processing[name] = module
-            elif isinstance(module, nn.Conv2d) and (module.stride == (2, 2) or 'down' in name):
-                self.ff_downsample_convs[name] = module
-        
-        # Extract feedback (decoder) weights
-        decoder = decoder
         if freeze_decoder:
             for param in decoder.parameters():
                 param.requires_grad = False
             decoder.eval()
-        self.fb_local_processing = {}
-        self.fb_upsample_convs = {}
 
-        for name, module in (decoder.named_modules()):
-            if isinstance(module, DenseLocalStage):
-                self.fb_local_processing[name] = module
-            elif isinstance(module, (DenseUpConv2d, nn.ConvTranspose2d)) and (module.stride == (2, 2) or 'up' in name):
-                self.fb_upsample_convs[name] = module
-        
-        self.ff_names = list(self.ff_local_processing.keys())
-        self.fb_names = list(self.fb_local_processing.keys())
+        stage_specs = self._extract_modular_stage_specs(encoder, decoder)
+        if stage_specs is None:
+            stage_specs = self._extract_legacy_stage_specs(encoder, decoder)
+        self.ff_stage_specs, self.fb_stage_specs = stage_specs
 
         # Task-specific top readout (V4) for discriminative mode.
         self.discriminative_head = head
@@ -221,8 +296,12 @@ class COALANet(nn.Module):
                 param.requires_grad = False
             self.discriminative_head.eval()
 
-        # Generative readout clamps the V1 feedback state through the pretrained decoder output conv.
-        self.generative_head = decoder.up28_to_out
+        # Generative readout clamps the V1 feedback state through the pretrained generative head.
+        self.generative_head = generative_head if generative_head is not None else getattr(decoder, "up28_to_out", None)
+        if self.generative_head is not None and freeze_head:
+            for param in self.generative_head.parameters():
+                param.requires_grad = False
+            self.generative_head.eval()
 
     def iter_cc_modules(self):
         return iter(self.cc_layers)
@@ -256,7 +335,7 @@ class FF_Conv2d(nn.Module):
         super(FF_Conv2d, self).__init__()
         self.conv = conv
         self.local_processing = local_processing
-        self.out_channels = conv.out_channels
+        self.out_channels = _infer_module_out_channels(conv, local_processing=local_processing)
 
     def forward(self, x:torch.Tensor, keep_mask:torch.Tensor)->torch.Tensor:
         x = self.conv(x, keep_mask)
@@ -274,7 +353,7 @@ class FB_Conv2d(nn.Module):
         super(FB_Conv2d, self).__init__()
         self.upconv = upconv
         self.local_processing = local_processing
-        self.out_channels = upconv.out_channels if upconv is not None else local_processing.n_channels
+        self.out_channels = _infer_module_out_channels(upconv, local_processing=local_processing)
 
     def forward(self, x:torch.Tensor, skip:torch.Tensor|None)->torch.Tensor:
         if self.upconv is not None:
@@ -285,16 +364,52 @@ class FB_Conv2d(nn.Module):
         return x
 
 # --- COALANet utils ---
-_RECONSTRUCTION_HEAD_CHECKPOINTS = sorted(
-    (Path(Head_logs) / "reconstruction" / "lightning_logs" / "version_1" / "checkpoints").glob("*.ckpt")
-)
-DEFAULT_RECONSTRUCTION_HEAD_CHECKPOINT_PATH = (
-    str(_RECONSTRUCTION_HEAD_CHECKPOINTS[-1]) if _RECONSTRUCTION_HEAD_CHECKPOINTS else None
-)
-_CLASSIFIER_CHECKPOINTS = sorted(
-    (Path(Classifier_logs) / "lightning_logs").glob("version_*/checkpoints/*.ckpt")
-)
-DEFAULT_CLASSIFIER_CHECKPOINT_PATH = str(_CLASSIFIER_CHECKPOINTS[-1]) if _CLASSIFIER_CHECKPOINTS else None
+def _latest_checkpoint(pattern: str | Path) -> str | None:
+    checkpoints = sorted(Path(pattern).glob("version_*/checkpoints/*.ckpt"))
+    return str(checkpoints[-1]) if checkpoints else None
+
+
+DEFAULT_PRETRAINED_CHECKPOINT_PATH = _latest_checkpoint(dataset_lightning_logs_dir(MAE_logs, "mnist"))
+DEFAULT_RECONSTRUCTION_HEAD_CHECKPOINT_PATH = _latest_checkpoint(Path(Head_logs) / "reconstruction" / "mnist" / "lightning_logs")
+DEFAULT_CLASSIFIER_CHECKPOINT_PATH = _latest_checkpoint(Path(Classifier_logs) / "mnist" / "lightning_logs")
+
+
+def _infer_module_out_channels(module: nn.Module | None, local_processing: nn.Module | None = None) -> int:
+    if module is not None:
+        if hasattr(module, "out_channels"):
+            return int(module.out_channels)
+        inner = getattr(module, "transition", None)
+        if inner is not None and hasattr(inner, "out_channels"):
+            return int(inner.out_channels)
+        inner = getattr(module, "upconv", None)
+        if inner is not None and hasattr(inner, "out_channels"):
+            return int(inner.out_channels)
+    if local_processing is not None and hasattr(local_processing, "n_channels"):
+        return int(local_processing.n_channels)
+    if local_processing is not None:
+        normalized_shape = tuple(local_processing.pre_norm.norm.normalized_shape)
+        return int(normalized_shape[0])
+    raise ValueError(f"Could not infer output channels for module {module!r}.")
+
+
+def _load_state_dict_from_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    weights_only: bool = True,
+) -> dict[str, torch.Tensor]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=weights_only)
+    return checkpoint.get("state_dict", checkpoint)
+
+
+def _extract_prefixed_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    prefixes: tuple[str, ...],
+) -> dict[str, torch.Tensor] | None:
+    for prefix in prefixes:
+        extracted = {key[len(prefix):]: value for key, value in state_dict.items() if key.startswith(prefix)}
+        if extracted:
+            return extracted
+    return None
 
 
 def _load_generative_head_weights(
@@ -312,20 +427,14 @@ def _load_generative_head_weights(
         )
         return
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = checkpoint.get("state_dict", checkpoint)
+    state_dict = _load_state_dict_from_checkpoint(checkpoint_path, weights_only=True)
     candidate_prefixes = (
+        "reconstruction_head.",
         "model.decoder.up28_to_out.",
         "decoder.up28_to_out.",
         "up28_to_out.",
     )
-
-    head_state_dict = None
-    for prefix in candidate_prefixes:
-        extracted = {key[len(prefix):]: value for key, value in state_dict.items() if key.startswith(prefix)}
-        if extracted:
-            head_state_dict = extracted
-            break
+    head_state_dict = _extract_prefixed_state_dict(state_dict, candidate_prefixes)
 
     if head_state_dict is None:
         warnings.warn(
@@ -338,8 +447,37 @@ def _load_generative_head_weights(
     generative_head.load_state_dict(head_state_dict, strict=True)
 
 
+def _load_discriminative_head_weights(
+    discriminative_head: nn.Module,
+    checkpoint_path: str | Path | None,
+) -> None:
+    if checkpoint_path is None:
+        return
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        warnings.warn(
+            f"Skipping classifier-head load because checkpoint does not exist: {checkpoint_path}",
+            stacklevel=2,
+        )
+        return
+
+    state_dict = _load_state_dict_from_checkpoint(checkpoint_path, weights_only=True)
+    head_state_dict = _extract_prefixed_state_dict(
+        state_dict,
+        prefixes=("head.", "model.head.", "classifier.head."),
+    )
+    if head_state_dict is None:
+        warnings.warn(
+            f"Skipping classifier-head load because no compatible head weights were found in {checkpoint_path}.",
+            stacklevel=2,
+        )
+        return
+    discriminative_head.load_state_dict(head_state_dict, strict=False)
+
+
 def _infer_encoder_latent_dim(
-    encoder: SparseCNNEncoder,
+    encoder: nn.Module,
     *,
     num_input_channels: int,
     spatial_size: tuple[int, int] = (28, 28),
@@ -353,80 +491,242 @@ def _infer_encoder_latent_dim(
     return int(features[0].numel())
 
 
+def infer_dataset_name_from_checkpoint_path(checkpoint_path: str | Path) -> str | None:
+    path = Path(checkpoint_path)
+    for part in reversed(path.parts):
+        normalized = re.sub(r"[^a-z0-9]+", "_", part.lower()).strip("_")
+        if not normalized:
+            continue
+        candidate = _LOG_DATASET_ALIASES.get(normalized, normalized)
+        try:
+            return resolve_dataset_name(candidate)
+        except KeyError:
+            continue
+    return None
+
+
+def _extract_dataset_targets(dataset: Dataset) -> list[int]:
+    if isinstance(dataset, Subset):
+        base_targets = _extract_dataset_targets(dataset.dataset)
+        return [int(base_targets[index]) for index in dataset.indices]
+    for attr_name in ("targets", "labels"):
+        if hasattr(dataset, attr_name):
+            targets = getattr(dataset, attr_name)
+            if isinstance(targets, torch.Tensor):
+                return [int(value) for value in targets.tolist()]
+            return [int(value) for value in targets]
+    raise AttributeError(f"Dataset of type {type(dataset)!r} does not expose targets/labels.")
+
+
+def _filter_dataset_by_labels(dataset: Dataset, accepted_labels: list[int] | None) -> Dataset:
+    if accepted_labels is None:
+        return dataset
+    accepted = sorted({int(label) for label in accepted_labels})
+    if len(accepted) == 0:
+        raise ValueError("accepted_digits must contain at least one label when provided.")
+    targets = _extract_dataset_targets(dataset)
+    indices = [index for index, label in enumerate(targets) if int(label) in accepted]
+    if len(indices) == 0:
+        raise ValueError(f"No samples found for accepted_digits={accepted}.")
+    return Subset(dataset, indices)
+
+
+def visualize_masked_sequence_examples(
+    dataset_name: str,
+    *,
+    split: Literal["train", "val", "test"] = "train",
+    root: str | Path = DATADIR,
+    download: bool = True,
+    num_examples: int = 4,
+    mask_ratio: float = 0.5,
+    masked_fill: str | float = 0.0,
+    visible_corrupt: bool = False,
+    patch_size: int = 4,
+    number_of_masks: int = 100,
+    timesteps_per_mask: int = 1,
+    accepted_digits: list[int] | None = None,
+    target_type: str = "label",
+    show: bool = True,
+    shuffle_examples: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    import matplotlib.pyplot as plt
+    import torchvision
+
+    train_loader, val_loader, test_loader = get_dataloaders(
+        dataset_name,
+        root=str(root),
+        batch_size=max(1, num_examples),
+        num_workers=0,
+        download=download,
+    )
+    datasets = {
+        "train": train_loader.dataset,
+        "val": val_loader.dataset,
+        "test": test_loader.dataset,
+    }
+    base_dataset = _filter_dataset_by_labels(datasets[split], accepted_digits)
+    sequence_dataset = MaskedSequentialDataset(
+        base_dataset,
+        patch_size=patch_size,
+        mask_ratio=mask_ratio,
+        number_of_masks=number_of_masks,
+        timesteps_per_mask=timesteps_per_mask,
+        masked_fill=masked_fill,
+        visible_corrupt=visible_corrupt,
+        target_type=target_type,
+    )
+    loader = DataLoader(
+        sequence_dataset,
+        batch_size=max(1, num_examples),
+        shuffle=shuffle_examples,
+        num_workers=0,
+    )
+    masked_imgs, targets = next(iter(loader))
+    if show:
+        batch_size, total_t, channels, height, width = masked_imgs.shape
+        vmin, vmax = masked_imgs.min().item(), masked_imgs.max().item()
+        frames = masked_imgs.reshape(batch_size * total_t, channels, height, width)
+        grid_img = torchvision.utils.make_grid(
+            frames,
+            nrow=total_t,
+            normalize=False,
+            padding=2,
+            pad_value=(vmax - vmin) / 2,
+        )
+        fig, ax = plt.subplots(figsize=(2 * total_t, 2 * batch_size))
+        if channels == 1:
+            ax.imshow(grid_img[0], cmap="gray", vmin=vmin, vmax=vmax, interpolation="nearest")
+        else:
+            ax.imshow(grid_img.permute(1, 2, 0), interpolation="nearest")
+        ax.axis("off")
+        fig.tight_layout()
+        plt.show()
+    return masked_imgs, targets
+
+
 def load_pretrained_weights(
     mode: Literal["discriminative", "generative"] = "discriminative",
-    reconstruction_head_checkpoint_path: str | Path | None = DEFAULT_RECONSTRUCTION_HEAD_CHECKPOINT_PATH,
+    pretrained_checkpoint_path: str | Path | None = DEFAULT_PRETRAINED_CHECKPOINT_PATH,
+    reconstruction_head_checkpoint_path: str | Path | None = None,
     classifier_checkpoint_path: str | Path | None = DEFAULT_CLASSIFIER_CHECKPOINT_PATH,
+    num_classes: int | None = None,
 )->COALANet:
-    # MAE models
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_13/checkpoints/epoch=19-step=8440.ckpt"
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_18/checkpoints/epoch=19-step=8440.ckpt" # improved MAE
-    
-    # dMAE models
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_26/checkpoints/epoch=49-step=21100.ckpt" # denoising MAE, random level of noise
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_21/checkpoints/epoch=19-step=8440.ckpt" # denoising MAE, more noise
-    # mae_checkpoint_path = f"{MAE_logs}/lightning_logs/version_27/checkpoints/epoch=50-step=21522.ckpt" # "FM" dMAE pretraining, also good
-    
-    # FM models
-    # mae_checkpoint_path = f"{FM_logs}/lightning_logs/version_1/checkpoints/epoch=18-step=16036.ckpt" # FM model, pretrained for 21 epochs
-    
-    # JEPA models
-    mae_checkpoint_path = f"{LeJEPA_logs}/lightning_logs/version_11/checkpoints/epoch=50-step=21522.ckpt" # LeJEPA model, pretrained
+    if pretrained_checkpoint_path is None:
+        raise FileNotFoundError("No pretrained checkpoint path is configured.")
 
-    mae_checkpoint = torch.load(mae_checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint_path = Path(pretrained_checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Missing pretrained checkpoint: {checkpoint_path}")
+
+    mae_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     mae_hparams = dict(mae_checkpoint.get("hyper_parameters", {}))
-    mae_num_input_channels = int(mae_hparams.get("num_input_channels", 1))
-    mae_num_filters = int(mae_hparams.get("num_filters", 32))
-    mae_decoder_densify_mode = str(mae_hparams.get("decoder_densify_mode", "random"))
-    mae_use_skip = bool(mae_hparams.get("use_skip", True))
-    mae_upconv_method = str(mae_hparams.get("upconv_method", "upsample+conv"))
-    # Older MAE checkpoints predate this hparam and used LayerNorm throughout.
-    mae_norm_type = str(mae_hparams.get("norm_type", "layernorm"))
+    state_dict = mae_checkpoint.get("state_dict", mae_checkpoint)
 
-    # Define pre-trained autoencoder model
-    mae_model = SparseCNNUNet(
-        num_input_channels=mae_num_input_channels,
-        num_output_channels=mae_num_input_channels,
-        num_filters=mae_num_filters,
-        decoder_densify_mode=mae_decoder_densify_mode,
-        use_skip=mae_use_skip,
-        upconv_method=mae_upconv_method,
-        norm_type=mae_norm_type,
-    )
-    # Load pre-trained autoencoder weights (replace with actual checkpoint path)
-    load_checkpoint(mae_model, mae_checkpoint_path, strict=False)
-    _load_generative_head_weights(mae_model.decoder.up28_to_out, reconstruction_head_checkpoint_path)
-    encoder:SparseCNNEncoder = mae_model.encoder
-    decoder:SparseCNNDecoder = mae_model.decoder
-    
-    mnist_classifier_head = None
+    if "model_config" in mae_hparams:
+        model_config = normalize_model_config(mae_hparams["model_config"])
+        mae_model = instantiate_autoencoder(model_config, predictive=False)
+        autoencoder_state = _extract_prefixed_state_dict(state_dict, prefixes=("model.",))
+        if autoencoder_state is None:
+            autoencoder_state = state_dict
+        mae_model.load_state_dict(autoencoder_state, strict=False)
+        encoder = mae_model.encoder
+        decoder = mae_model.decoder
+        input_shape = tuple(model_config["input_shape"])
+        first_feature = encoder.feature_names[0]
+        reconstruction_head_config = normalize_reconstruction_head_config(
+            mae_hparams.get(
+                "reconstruction_head_config",
+                default_reconstruction_head_config(
+                    family=str(mae_hparams.get("reconstruction_head_family", "ConvNet")),
+                    input_shape=encoder.spatial_shapes[0],
+                    output_shape=input_shape[1:],
+                    feature_dim=encoder.feature_dims[0],
+                    num_output_channels=input_shape[0],
+                ),
+            )
+        )
+        generative_head = GenerativeHead(
+            family=reconstruction_head_config["family"],
+            in_channels=encoder.feature_dims[0],
+            input_spatial_shape=encoder.spatial_shapes[0],
+            output_spatial_shape=input_shape[1:],
+            num_output_channels=reconstruction_head_config["num_output_channels"],
+            kwargs=reconstruction_head_config["kwargs"],
+        )
+        in_checkpoint_head = _extract_prefixed_state_dict(state_dict, prefixes=("reconstruction_head.",))
+        if in_checkpoint_head is not None:
+            generative_head.load_state_dict(in_checkpoint_head, strict=True)
+        elif reconstruction_head_checkpoint_path is not None:
+            _load_generative_head_weights(generative_head, reconstruction_head_checkpoint_path)
+        else:
+            warnings.warn(
+                "Modular checkpoint does not include reconstruction_head weights; generative head will stay randomly initialized.",
+                stacklevel=2,
+            )
+        top_feature_key = encoder.feature_names[-1]
+    else:
+        mae_num_input_channels = int(mae_hparams.get("num_input_channels", 1))
+        mae_num_filters = int(mae_hparams.get("num_filters", 32))
+        mae_decoder_densify_mode = str(mae_hparams.get("decoder_densify_mode", "random"))
+        mae_use_skip = bool(mae_hparams.get("use_skip", True))
+        mae_upconv_method = str(mae_hparams.get("upconv_method", "upsample+conv"))
+        mae_norm_type = str(mae_hparams.get("norm_type", "layernorm"))
+
+        mae_model = SparseCNNUNet(
+            num_input_channels=mae_num_input_channels,
+            num_output_channels=mae_num_input_channels,
+            num_filters=mae_num_filters,
+            decoder_densify_mode=mae_decoder_densify_mode,
+            use_skip=mae_use_skip,
+            upconv_method=mae_upconv_method,
+            norm_type=mae_norm_type,
+        )
+        load_checkpoint(mae_model, str(checkpoint_path), strict=False)
+        encoder = mae_model.encoder
+        decoder = mae_model.decoder
+        generative_head = decoder.up28_to_out
+        if reconstruction_head_checkpoint_path is not None:
+            _load_generative_head_weights(generative_head, reconstruction_head_checkpoint_path)
+        input_shape = (
+            mae_num_input_channels,
+            int(mae_hparams.get("image_size", 28)),
+            int(mae_hparams.get("image_size", 28)),
+        )
+        top_feature_key = "feat4"
+
+    discriminative_head = None
     if mode == "discriminative":
+        if num_classes is None:
+            num_classes = 10
         latent_dim = _infer_encoder_latent_dim(
             encoder,
-            num_input_channels=mae_num_input_channels,
-            feature_key="feat4",
+            num_input_channels=input_shape[0],
+            spatial_size=input_shape[1:],
+            feature_key=top_feature_key,
         )
-        mnist_classifier = ClassifierHead(
-            encoder=encoder,
-            num_classes=10,
-            latent_dim=latent_dim,
-            lr=1e-3,
-            freeze_encoder=True,
+        discriminative_head = nn.Sequential(
+            nn.Flatten(start_dim=1),
+            nn.Linear(latent_dim, int(num_classes)),
         )
-        if classifier_checkpoint_path is not None:
-            try:
-                load_checkpoint(mnist_classifier, str(classifier_checkpoint_path), weights_only=False, strict=False)
-            except RuntimeError as exc:
-                warnings.warn(
-                    "Skipping classifier checkpoint load because it does not match the current backbone "
-                    f"shape after the L4 changes. The discriminative head will stay randomly initialized.\n{exc}",
-                    stacklevel=2,
-                )
-        # Extract the classifier head
-        mnist_classifier_head = mnist_classifier.head
+        try:
+            _load_discriminative_head_weights(discriminative_head, classifier_checkpoint_path)
+        except RuntimeError as exc:
+            warnings.warn(
+                "Skipping classifier checkpoint load because it does not match the current backbone shape. "
+                f"The discriminative head will stay randomly initialized.\n{exc}",
+                stacklevel=2,
+            )
 
     # Instantiate COALANet with the loaded encoder, decoder, and head
-    model = COALANet(encoder, decoder, mnist_classifier_head, mode=mode)
+    model = COALANet(
+        encoder,
+        decoder,
+        discriminative_head,
+        generative_head=generative_head,
+        data_dims=input_shape,
+        config=mae_hparams.get("model_config"),
+        mode=mode,
+    )
 
     return model
 
@@ -571,13 +871,27 @@ def create_temporal_reconstruction_grid(
 
     reconstructions = _to_display_range(stack_temporal_reconstructions(reconstructions).detach().cpu())
     masked_images = _to_display_range(masked_images[:num_examples].detach().cpu())
-    target_images = _to_display_range(target_images[:num_examples].detach().cpu())
     reconstructions = reconstructions[:num_examples]
+    target_images = target_images[:num_examples].detach().cpu()
+    if target_images.dim() == 4:
+        target_images = _to_display_range(target_images).unsqueeze(1).expand(-1, reconstructions.shape[1], -1, -1, -1)
+    elif target_images.dim() == 5:
+        target_images = _to_display_range(target_images)
+    else:
+        raise ValueError(
+            "target_images must have shape (B, C, H, W) or (B, T, C, H, W), "
+            f"got {tuple(target_images.shape)}."
+        )
 
     if masked_images.shape[:2] != reconstructions.shape[:2]:
         raise ValueError(
             "masked_images and reconstructions must agree on batch and time dimensions, "
             f"got {tuple(masked_images.shape[:2])} vs {tuple(reconstructions.shape[:2])}."
+        )
+    if target_images.shape[:2] != reconstructions.shape[:2]:
+        raise ValueError(
+            "target_images and reconstructions must agree on batch and time dimensions, "
+            f"got {tuple(target_images.shape[:2])} vs {tuple(reconstructions.shape[:2])}."
         )
 
     _, total_t, _, _, _ = masked_images.shape
@@ -585,7 +899,7 @@ def create_temporal_reconstruction_grid(
     time_idx = torch.linspace(0, total_t - 1, steps=num_time_steps).round().long()
     masked_panel = masked_images[:, time_idx]
     recon_panel = reconstructions[:, time_idx]
-    target_panel = target_images[:, time_idx].unsqueeze(2)
+    target_panel = target_images[:, time_idx]
     panel = torch.stack((masked_panel, recon_panel, target_panel), dim=1).reshape(-1, *masked_images.shape[2:])
     return make_grid(panel, nrow=num_time_steps, normalize=False, pad_value=0.5)
 
@@ -613,17 +927,47 @@ def _parse_masked_fill_arg(masked_fill: str) -> str | float:
         return masked_fill
     return float(masked_fill)
 
-if __name__ == "__main__":
+
+def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        "--checkpoint_path",
+        default=DEFAULT_PRETRAINED_CHECKPOINT_PATH,
+        type=str,
+        help="Pretrained checkpoint to collapse into the recurrent COALANet demo.",
+    )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        type=str,
+        help="Dataset to wrap into the masked-sequential task. Defaults to inferring from checkpoint path.",
+    )
+    parser.add_argument("--split", default="train", choices=("train", "val", "test"), type=str)
+    parser.add_argument(
+        "--shuffle_examples",
+        action="store_true",
+        help="Shuffle the visualization loader so each run can sample different images.",
+    )
+    parser.add_argument("--data_dir", default=str(DATADIR), type=str)
+    parser.add_argument("--download", dest="download", action="store_true")
+    parser.add_argument("--no-download", dest="download", action="store_false")
+    parser.set_defaults(download=True)
+
     # Task and model configuration
     parser.add_argument("--mode",default="generative",choices=("discriminative", "generative"),type=str,
                         help="Which COALANet readout mode to demo.",)
+    parser.add_argument("--reconstruction_head_checkpoint_path", default=None, type=str,
+                        help="Optional standalone reconstruction-head checkpoint for legacy predictive backbones.")
+    parser.add_argument("--classifier_checkpoint_path", default=DEFAULT_CLASSIFIER_CHECKPOINT_PATH, type=str,
+                        help="Optional classifier-head checkpoint for discriminative mode.")
+    parser.add_argument("--num_classes", default=None, type=int,
+                        help="Number of classes for discriminative mode when no classifier checkpoint is supplied.")
     
     # Data stream configuration
     parser.add_argument("--num_examples", default=1, type=int, 
                         help="Number of examples to visualize.")
     parser.add_argument("--accepted_digits", nargs="*", type=int, default=None, 
-                        help="Optional subset of digits.")
+                        help="Optional subset of labels to sample. Historically used for MNIST digits.")
     
     # Masking configuration (for input stream)
     parser.add_argument("--number_of_masks", default=50, type=int, 
@@ -650,12 +994,32 @@ if __name__ == "__main__":
                         help="Which batch example to use for activation-map figures.")
     parser.add_argument("--activation_map_output_dir",default=None,type=str,
                         help="Optional directory where activation-map PNGs are saved.",)
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_argparser()
+    args = parser.parse_args(argv)
+
+    dataset_name = args.dataset
+    if dataset_name is None and args.checkpoint_path is not None:
+        dataset_name = infer_dataset_name_from_checkpoint_path(args.checkpoint_path)
+    dataset_name = "mnist" if dataset_name is None else resolve_dataset_name(dataset_name)
 
     target_type = "image" if args.mode == "generative" else "label"
-    coalanet = load_pretrained_weights(mode=args.mode)
+    coalanet = load_pretrained_weights(
+        mode=args.mode,
+        pretrained_checkpoint_path=args.checkpoint_path,
+        reconstruction_head_checkpoint_path=args.reconstruction_head_checkpoint_path,
+        classifier_checkpoint_path=args.classifier_checkpoint_path,
+        num_classes=args.num_classes,
+    )
     total_num_masks = max(1, args.number_of_masks + args.number_of_masks // 2)
-    examples, task_targets = visualize_msmnist_examples(
+    examples, task_targets = visualize_masked_sequence_examples(
+        dataset_name,
+        split=args.split,
+        root=args.data_dir,
+        download=args.download,
         num_examples=args.num_examples,
         number_of_masks=total_num_masks,
         timesteps_per_mask=args.timesteps_per_mask,
@@ -666,6 +1030,7 @@ if __name__ == "__main__":
         target_type=target_type,
         show=not args.hide_input_grid,
         patch_size=args.patch_size,
+        shuffle_examples=args.shuffle_examples,
     )
 
     with torch.no_grad():
@@ -734,4 +1099,7 @@ if __name__ == "__main__":
                 )
 
     plt.show()
+
+if __name__ == "__main__":
+    main()
     

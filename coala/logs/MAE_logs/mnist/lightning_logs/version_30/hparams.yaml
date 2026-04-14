@@ -1,0 +1,90 @@
+num_filters: 32
+lr: 0.0015
+mask_ratio: 0.6
+patch_size: 4
+masked_loss_weight: 1.0
+batch_size: 128
+num_input_channels: 1
+image_size: 28
+decoder_densify_mode: random
+use_skip: true
+upconv_method: upsample+conv
+norm_type: rmsnorm
+denoise: true
+denoise_sigma: 1.0
+warmup_epochs: 0
+weight_decay: 0.0
+reconstruction_head_family: ConvNet
+model_config:
+  input_shape:
+  - 1
+  - 28
+  - 28
+  d_layers:
+  - 16
+  - 32
+  - 64
+  - 128
+  layers_E: ConvNet
+  layers_D: ConvNet
+  layers_E_kwargs:
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 1
+    transition_padding: 1
+    block_kernel_size: 1
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 2
+    transition_padding: 1
+    block_kernel_size: 1
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 2
+    transition_padding: 1
+    block_kernel_size: 1
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 2
+    transition_padding: 1
+    block_kernel_size: 1
+  layers_D_kwargs:
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 1
+    transition_padding: 1
+    block_kernel_size: 1
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 2
+    transition_padding: 1
+    block_kernel_size: 1
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 2
+    transition_padding: 1
+    block_kernel_size: 1
+  - depth: 1
+    transition_kernel_size: 3
+    transition_stride: 2
+    transition_padding: 1
+    block_kernel_size: 1
+  E_kwargs:
+    norm_type: rmsnorm
+  D_kwargs:
+    norm_type: rmsnorm
+    densify_mode: random
+    use_skip: true
+    upsampling: upsample+conv
+  n_layers: 4
+reconstruction_head_config:
+  family: ConvNet
+  num_output_channels: 1
+  kwargs:
+    depth: 1
+masking_strategy: random
+multi_block_scale_min: 0.1
+multi_block_scale_max: 0.6
+multi_block_aspect_ratio_min: 0.5
+multi_block_aspect_ratio_max: 1.5
+multi_block_square_aspect_ratio: 1

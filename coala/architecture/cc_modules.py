@@ -152,7 +152,8 @@ class CCModule(nn.Module):
         # HVA cells
         if context is not None and self.FB_conv is not None and self.Lambda_FB is not None:
             y_FB = self.FB_conv(context, 
-                                None # y_FF
+                                # None,
+                                y_FF
                                 ) # y_FF is skip connection from SparK pretraining
             
         # "PV cells"
@@ -164,7 +165,11 @@ class CCModule(nn.Module):
         # drive = y_FF - y_FB
         
         # Summation
-        drive = self.Lambda_FF(y_FF) + self.Lambda_FB(y_FB) #- self.Lambda_LAT(y_LAT)
+        drive = (
+            # y_FF
+            + y_FB
+            # - self.Lambda_LAT(y_LAT)
+            )
 
         # Apply activation function (drive term) - identity for now
         drive = self.activation_fn(drive)
@@ -185,9 +190,9 @@ class CCModule(nn.Module):
         Local update, leaks back to 0; average over batch
         '''
         # self.Lambda_FF.update(Y, y_FF)
-        # self.Lambda_LAT.update(Y, y_LAT)
         # if self.Lambda_FB is not None:
         #     self.Lambda_FB.update(Y, y_FB)
+        # self.Lambda_LAT.update(Y, y_LAT)
 
     def reset_dynamic_state(self, ref_tensor:torch.Tensor|None = None)->None:
         self.Lambda_FF.reset(ref_tensor=ref_tensor)

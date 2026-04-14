@@ -116,7 +116,11 @@ class MAE(pl.LightningModule):
         if self.hparams.denoise:
             noise = self.hparams.denoise_sigma * torch.randn_like(imgs)
             model_input = torch.where(keep_mask, imgs + noise, noise).clamp_(-1.0, 1.0)
-        decoder_latents, _ = self.model(model_input, keep_mask=keep_mask)
+        decoder_latents, _ = self.model(model_input, 
+                                        # NOTE: do not provide mask TEST
+                                        keep_mask=torch.ones_like(keep_mask, dtype=torch.bool),
+                                        # keep_mask=keep_mask
+                                        )
         recon = self.reconstruction_head(decoder_latents[self.reconstruction_feature])
         return recon, keep_mask
 
