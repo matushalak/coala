@@ -12,6 +12,7 @@ dependencies:
   - seaborn
   - pytorch
   - torchvision
+  - tensorboard
   - pip
   - pip:
       - pytorch-lightning

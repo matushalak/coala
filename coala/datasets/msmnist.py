@@ -29,8 +29,9 @@ def msmnist(
         (batch_size, num_timeframes, channels, height, width),
     where num_timeframes = number_of_masks * timesteps_per_mask.
 
-    Targets are labels by default. For generative experiments use target_type="image"
-    to return the clean [-1, 1]-normalized image as the second item of each batch.
+    Targets are labels by default. Use target_type="image" to return the clean
+    [-1, 1]-normalized image, or target_type="both" to return both the clean image
+    and label in a dictionary.
     """
     data_transforms = transforms.Compose(
         [
@@ -146,7 +147,7 @@ def visualize_msmnist_examples(
     accepted_digits: list[int] | None = None,
     target_type: str = "label",
     show: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor | int]:
+) -> tuple[torch.Tensor, torch.Tensor | int | dict[str, torch.Tensor]]:
     import matplotlib.pyplot as plt
     train_loader, _, _ = msmnist(
         batch_size=num_examples,
