@@ -1,5 +1,6 @@
 # author: Matúš Halák (@matushalak)
 import torch
+import torch.nn.functional as F
 
 class EMA(torch.nn.Module):
     '''
@@ -17,12 +18,12 @@ class EMA(torch.nn.Module):
     '''
     def __init__(self, shape:tuple, alpha:float = 0.1, baseline:torch.Tensor | None = None):
         super().__init__()
-        self.alpha = alpha
+        self.alpha = torch.nn.Parameter(torch.tensor(alpha), requires_grad=False)
         self.register_buffer("baseline", baseline if baseline is not None else torch.zeros(shape, requires_grad=False))
         self.register_buffer("ema", self.baseline.clone())
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        self.ema = (1 - self.alpha) * self.ema + self.alpha * (x+self.baseline)
+        self.ema = (1 - F.sigmoid(self.alpha)) * self.ema + F.sigmoid(self.alpha) * (x+self.baseline)
         return self.ema
     
     def reset_state(self, batch_size:int | None = None):

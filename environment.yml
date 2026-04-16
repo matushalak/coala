@@ -13,6 +13,9 @@ dependencies:
   - pytorch
   - torchvision
   - tensorboard
+  - joblib
+  - tqdm
+  - scikit-learn
   - pip
   - pip:
       - pytorch-lightning

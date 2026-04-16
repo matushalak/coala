@@ -540,10 +540,13 @@ def visualize_masked_sequence_examples(
     num_examples: int = 4,
     mask_ratio: float = 0.5,
     masked_fill: str | float = 0.0,
+    noise_sigma: float = 0.25,
     visible_corrupt: bool = False,
     patch_size: int = 4,
     number_of_masks: int = 100,
     timesteps_per_mask: int = 1,
+    num_digits: int = 1,
+    image_visibility: str = "all",
     accepted_digits: list[int] | None = None,
     target_type: str = "label",
     show: bool = True,
@@ -572,7 +575,10 @@ def visualize_masked_sequence_examples(
         number_of_masks=number_of_masks,
         timesteps_per_mask=timesteps_per_mask,
         masked_fill=masked_fill,
+        noise_sigma=noise_sigma,
         visible_corrupt=visible_corrupt,
+        num_digits=num_digits,
+        image_visibility=image_visibility,
         target_type=target_type,
     )
     loader = DataLoader(
@@ -802,23 +808,38 @@ def create_temporal_prediction_figure(
 
     probs = torch.softmax(logits, dim=-1)
     preds = probs.argmax(dim=-1)
+    if labels.dim() == 1:
+        label_targets = labels.unsqueeze(1).expand(-1, logits.shape[1])
+    elif labels.dim() == 2:
+        if labels.shape[1] != logits.shape[1]:
+            raise ValueError(
+                "Per-timestep labels must match the logits time dimension, "
+                f"got {labels.shape[1]} vs {logits.shape[1]}."
+            )
+        label_targets = labels
+    else:
+        raise ValueError(f"Expected labels with shape (B,) or (B, T), got {tuple(labels.shape)}.")
     timesteps = torch.arange(logits.shape[1]).cpu().numpy()
     tick_step = max(1, logits.shape[1] // 12)
     fig_width = min(18.0, max(10.0, 0.35 * logits.shape[1]))
-    fig, axes = plt.subplots(labels.shape[0], 1, figsize=(fig_width, 2.2 * labels.shape[0]), sharex=True)
-    if labels.shape[0] == 1:
+    fig, axes = plt.subplots(label_targets.shape[0], 1, figsize=(fig_width, 2.2 * label_targets.shape[0]), sharex=True)
+    if label_targets.shape[0] == 1:
         axes = [axes]
 
     for i, ax in enumerate(axes):
-        true_label = int(labels[i].item())
-        true_prob = probs[i, :, true_label].numpy()
+        true_labels = label_targets[i]
+        true_prob = probs[i].gather(1, true_labels.unsqueeze(1)).squeeze(1).numpy()
         pred_prob = probs[i].max(dim=-1).values.numpy()
-        ax.plot(timesteps, true_prob, marker="o", label=f"P(true={true_label})")
+        start_label = int(true_labels[0].item())
+        end_label = int(true_labels[-1].item())
+        label_legend = f"true={start_label}" if start_label == end_label else f"true={start_label}->{end_label}"
+        ax.plot(timesteps, true_prob, marker="o", label=f"P({label_legend})")
         ax.plot(timesteps, pred_prob, marker="x", linestyle="--", label="P(pred)")
         ax.set_xlim(0, logits.shape[1] - 1)
         ax.set_ylabel(f"sample {i}")
         ax.grid(alpha=0.25)
-        ax.set_title(f"label={true_label} | final_pred={int(preds[i, -1].item())}")
+        label_text = f"label={start_label}" if start_label == end_label else f"label={start_label}->{end_label}"
+        ax.set_title(f"{label_text} | final_pred={int(preds[i, -1].item())}")
         ax.legend(loc="lower right")
 
     axes[-1].set_xlabel("time step")
@@ -976,12 +997,18 @@ def build_argparser() -> argparse.ArgumentParser:
                         help="How long each mask is reused.")
     parser.add_argument("--masked_fill", default="random", type=str, 
                         help="Masked pixel fill value or 'random'.")
+    parser.add_argument("--noise_sigma", default=0.25, type=float,
+                        help="Standard deviation of the Gaussian noise used for masked or corrupted pixels.")
     parser.add_argument("--mask_ratio", default=0.6, type=float, 
                         help="Fraction of masked patches.")
     parser.add_argument("--patch_size", default=4, type=int, 
                         help="Size of each patch.")
     parser.add_argument("--visible_corrupt", action='store_true', 
                         help="Whether to corrupt visible pixels.")
+    parser.add_argument("--num_digits", default=1, type=int,
+                        help="How many distinct digits to concatenate in time for each sample.")
+    parser.add_argument("--image_visibility", default="all", type=str,
+                        help="Which masked frames remain visible: 'all', 'first', or 'every-N'.")
 
     # Visualization configuration
     parser.add_argument("--max_time_steps", default=100, type=int, 
@@ -1025,7 +1052,10 @@ def main(argv: list[str] | None = None) -> None:
         timesteps_per_mask=args.timesteps_per_mask,
         mask_ratio=args.mask_ratio,
         masked_fill=_parse_masked_fill_arg(args.masked_fill),
+        noise_sigma=args.noise_sigma,
         visible_corrupt=args.visible_corrupt,
+        num_digits=args.num_digits,
+        image_visibility=args.image_visibility,
         accepted_digits=args.accepted_digits,
         target_type=target_type,
         show=not args.hide_input_grid,

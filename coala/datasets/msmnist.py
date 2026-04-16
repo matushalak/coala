@@ -16,9 +16,12 @@ def msmnist(
     mask_ratio: float = 0.5,
     mask_pattern: str = "random",
     masked_fill: str | float = 0.0,
+    noise_sigma: float = 0.25,
     visible_corrupt:bool = False,
     number_of_masks: int = 100,
     timesteps_per_mask: int = 1,
+    num_digits: int = 1,
+    image_visibility: str = "all",
     accepted_digits: list[int] | None = None,
     target_type: str = "label",
 ):
@@ -27,11 +30,12 @@ def msmnist(
 
     Each data batch has shape:
         (batch_size, num_timeframes, channels, height, width),
-    where num_timeframes = number_of_masks * timesteps_per_mask.
+    where num_timeframes = number_of_masks * timesteps_per_mask * num_digits.
 
     Targets are labels by default. Use target_type="image" to return the clean
     [-1, 1]-normalized image, or target_type="both" to return both the clean image
-    and label in a dictionary.
+    and label in a dictionary. When num_digits > 1, clean targets are returned per
+    timestep and labels are returned as per-timestep sequences.
     """
     data_transforms = transforms.Compose(
         [
@@ -84,7 +88,10 @@ def msmnist(
         timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
         masked_fill=masked_fill,
+        noise_sigma=noise_sigma,
         visible_corrupt=visible_corrupt,
+        num_digits=num_digits,
+        image_visibility=image_visibility,
         target_type=target_type,
     )
     val_dataset = MaskedSequentialDataset(
@@ -95,7 +102,10 @@ def msmnist(
         timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
         masked_fill=masked_fill,
+        noise_sigma=noise_sigma,
         visible_corrupt=visible_corrupt,
+        num_digits=num_digits,
+        image_visibility=image_visibility,
         target_type=target_type,
     )
     test_dataset = MaskedSequentialDataset(
@@ -106,7 +116,10 @@ def msmnist(
         timesteps_per_mask=timesteps_per_mask,
         mask_pattern=mask_pattern,
         masked_fill=masked_fill,
+        noise_sigma=noise_sigma,
         visible_corrupt=visible_corrupt,
+        num_digits=num_digits,
+        image_visibility=image_visibility,
         target_type=target_type,
     )
 
@@ -140,10 +153,13 @@ def visualize_msmnist_examples(
     num_examples: int = 4,
     mask_ratio: float = 0.5,
     masked_fill: str | float = 0.0,
+    noise_sigma: float = 0.25,
     visible_corrupt: bool = False,
     patch_size:int = 4,
     number_of_masks: int = 100,
     timesteps_per_mask: int = 1,
+    num_digits: int = 1,
+    image_visibility: str = "all",
     accepted_digits: list[int] | None = None,
     target_type: str = "label",
     show: bool = True,
@@ -154,9 +170,12 @@ def visualize_msmnist_examples(
         num_workers=0,
         mask_ratio=mask_ratio,
         masked_fill=masked_fill,
+        noise_sigma=noise_sigma,
         visible_corrupt=visible_corrupt,
         number_of_masks=number_of_masks,
         timesteps_per_mask=timesteps_per_mask,
+        num_digits=num_digits,
+        image_visibility=image_visibility,
         patch_size=patch_size,
         accepted_digits=accepted_digits,
         target_type=target_type,

@@ -7,77 +7,75 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from torchvision.utils import make_grid
+from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 
-from coala import DATADIR, RNN_logs, dataset_log_dir
+from coala import DATADIR, dataset_log_dir, lrRNN_logs
 from coala.datasets import get_dataloaders
 from coala.rnn.utils import EMA
 
-# TODO
-# try staged approach: first only train on clean images
-# then denoise
-# then occlusion
-
-class hConvRNN(nn.Module):
+# TODO: can we get hierarchical organization (off-diagonal blocks in connectivity matrix) + convolution-like RFs to emerge
+# just by nature of the task, inductive biases in the data and architecture?
+class lrRNN(nn.Module):
     """
-    Simplest possible hierarchical Conv RNN architecture.
+    Simplest possible RNN pool architecture, where we try to force hierarchical organization to emerge somehow
     """
 
-    def __init__(self, input_features: int = 1, V0_features:int = 8, V1_features: int = 16, V2_features: int = 32, V4_features: int = 64):
+    def __init__(self, input_features: int = 1, V1_features: int = 16, V2_features: int = 32, V4_features: int = 256,
+                 rank:int = 4):
         super().__init__()
         
-        self.W_v0FF = nn.Conv2d(input_features, V0_features, kernel_size=3, padding=1, stride=1)
-        self.W_v0FB = nn.ConvTranspose2d(V1_features, V0_features, kernel_size=5, padding=2, stride=2, output_padding=1)
-        
-        self.W_v1FF = nn.Conv2d(V0_features, V1_features, kernel_size=5, padding=2, stride=2)
-        self.W_v1FB = nn.ConvTranspose2d(V2_features, V1_features, kernel_size=3, padding=1, stride=2, output_padding=1)
-        self.W_recon = nn.ConvTranspose2d(V1_features, input_features, kernel_size=5, padding=2, stride=2, output_padding=1)
-        
-        self.W_v2FF = nn.Conv2d(V1_features, V2_features, kernel_size=3, padding=1, stride=2)
-        self.W_v2FB = nn.ConvTranspose2d(V4_features, V2_features, kernel_size=7, padding=0, stride=1)
+        self.W_input = nn.Linear(28*28*input_features, 14*14*V1_features)
+        self.W_recon = nn.Linear(14*14*V1_features, 28*28*input_features)
+        self.W_class = nn.Linear(1*1*V4_features, 10)
 
-        self.W_v4FF = nn.Conv2d(V2_features, V4_features, kernel_size=7, padding=0, stride=1)
-        self.W_class = nn.Linear(V4_features, 10)
+        # Low-rank approximation of full connectivity matrix
+        self.W_L = nn.Linear(14*14*V1_features+7*7*V2_features+1*1*V4_features, rank)
+        self.W_R = nn.Linear(rank, 14*14*V1_features+7*7*V2_features+1*1*V4_features)
 
         # Alphas go into sigmoid, so effective alpha is in (0, 1);
-        self.V0 = EMA((1, V0_features, 28, 28), alpha=0.0)
-        self.V1 = EMA((1, V1_features, 14, 14), alpha=-0.5)
-        self.V2 = EMA((1, V2_features, 7, 7), alpha=-1.0)
-        self.V4 = EMA((1, V4_features, 1, 1), alpha=-1.5)
+        self.V1 = EMA((1, V1_features*14*14), alpha=1.0)
+        self.V1_slice = slice(0, V1_features*14*14)
+        
+        self.V2 = EMA((1, V2_features*7*7), alpha=-2.5)
+        self.V2_slice = slice(V1_features*14*14, 
+                              V1_features*14*14 + V2_features*7*7)
+        
+        self.V4 = EMA((1, V4_features*1*1), alpha=-5.0)
+        self.V4_slice = slice(V1_features*14*14 + V2_features*7*7, 
+                              V1_features*14*14 + V2_features*7*7 + V4_features*1*1)
+
+    @torch.no_grad()
+    def full_connectivity_matrix(self) -> torch.Tensor:
+        return self.W_R.weight @ self.W_L.weight
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         recon = []
         class_logits = []
 
-        self.V0.reset_state(batch_size=x.shape[0])
         self.V1.reset_state(batch_size=x.shape[0])
         self.V2.reset_state(batch_size=x.shape[0])
         self.V4.reset_state(batch_size=x.shape[0])
 
+        network_state = torch.zeros(x.shape[0], self.V1.ema.shape[1] + self.V2.ema.shape[1] + self.V4.ema.shape[1], 
+                                    device=x.device)
         for t in range(x.shape[1]):
             x_t = x[:, t]
             
-            # All inputs at once
-            # V0
-            V0_ff = self.W_v0FF(x_t)
-            V0_fb = self.W_v0FB(self.V1.ema)
-            # V1
-            V1_ff = self.W_v1FF(self.V0.ema)
-            V1_fb = self.W_v1FB(self.V2.ema)
-            # V2
-            V2_ff = self.W_v2FF(self.V1.ema)
-            V2_fb = self.W_v2FB(self.V4.ema)
-            # V4
-            V4_ff = self.W_v4FF(self.V2.ema)
+            # Compute interactions
+            network_state = self.W_R(self.W_L(network_state))
+            # Give input to network
+            V1_ff = self.W_input(x_t.view(x_t.shape[0], -1))
+            network_state[:, self.V1_slice] += V1_ff
+            # Compute activations
+            network_state = F.gelu(network_state)
             
-            # All activations at once
-            self.V0(F.gelu(V0_ff + V0_fb))
-            self.V1(F.gelu(V1_ff + V1_fb))
-            self.V2(F.gelu(V2_ff + V2_fb))
-            self.V4(F.gelu(V4_ff))
-            
-            recon.append(self.W_recon(self.V1.ema))
+            # Temporally integrate activations
+            network_state[:, self.V1_slice] = self.V1(network_state[:, self.V1_slice])
+            network_state[:, self.V2_slice] = self.V2(network_state[:, self.V2_slice])
+            network_state[:, self.V4_slice] = self.V4(network_state[:, self.V4_slice])
+
+            recon.append(self.W_recon(self.V1.ema).view(x_t.shape))
             class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
 
         return torch.stack(recon, dim=1), torch.stack(class_logits, dim=1)
@@ -160,6 +158,33 @@ def make_reconstruction_grid(
     )
 
 
+@torch.no_grad()
+def connectivity_matrix_to_image(connectivity: torch.Tensor) -> torch.Tensor:
+    connectivity = connectivity.detach().float().cpu()
+    scale = connectivity.abs().max().clamp_min(1e-8)
+    normalized = (connectivity / scale).clamp_(-1.0, 1.0)
+    pos = normalized.clamp_min(0.0)
+    neg = (-normalized).clamp_min(0.0)
+    red = 1.0 - neg
+    green = 1.0 - (pos + neg)
+    blue = 1.0 - pos
+    return torch.stack((red, green, blue), dim=0)
+
+
+@torch.no_grad()
+def log_connectivity_matrix(
+    model: lrRNN,
+    writer: SummaryWriter,
+    run_dir: Path,
+    epoch: int,
+) -> None:
+    connectivity = model.full_connectivity_matrix()
+    image = connectivity_matrix_to_image(connectivity)
+    log_step = epoch + 1
+    writer.add_image("connectivity/full_matrix", image, log_step)
+    writer.add_scalar("connectivity/max_abs_weight", connectivity.abs().max().item(), log_step)
+
+
 def create_run_dir(log_root: str | Path) -> Path:
     log_root = Path(log_root)
     log_root.mkdir(parents=True, exist_ok=True)
@@ -185,7 +210,7 @@ def save_run_metadata(run_dir: Path, args: argparse.Namespace | None = None):
 
 def save_checkpoint(
     checkpoint_path: Path,
-    model: hConvRNN,
+    model: lrRNN,
     optimizer: torch.optim.Optimizer,
     epoch: int,
     train_loss: float,
@@ -207,7 +232,7 @@ def save_checkpoint(
 
 @torch.no_grad()
 def evaluate(
-    model: hConvRNN,
+    model: lrRNN,
     dataloader: torch.utils.data.DataLoader,
     device: torch.device,
     writer: SummaryWriter,
@@ -265,7 +290,7 @@ def evaluate(
 
 
 def train(
-    model: hConvRNN,
+    model: lrRNN,
     train_loader: torch.utils.data.DataLoader,
     val_loader: torch.utils.data.DataLoader,
     n_epochs: int,
@@ -316,6 +341,7 @@ def train(
         writer.add_scalar("train_loss", train_loss, log_step)
         writer.add_scalar("train_recon_loss", train_recon_loss, log_step)
         writer.add_scalar("train_class_loss", train_class_loss, log_step)
+        # log_connectivity_matrix(model, writer, run_dir, epoch)
 
         val_recon_loss, val_class_loss, val_loss, val_accuracy_percent = evaluate(
             model=model,
@@ -324,6 +350,7 @@ def train(
             writer=writer,
             epoch=epoch,
             max_batches=max_val_batches,
+            num_examples=args.num_examples if args is not None else 5,
         )
         print(
             f"Epoch {epoch + 1}: "
@@ -335,7 +362,7 @@ def train(
             f"val_class={val_class_loss:.4f}, "
             f"val_acc={val_accuracy_percent:.2f}%"
         )
-        print(f"Alpha values - V0: {F.sigmoid(model.V0.alpha):.6f}, V1: {F.sigmoid(model.V1.alpha):.6f}, V2: {F.sigmoid(model.V2.alpha):.6f}, V4: {F.sigmoid(model.V4.alpha):.6f}")
+        print(f"Alpha values - V1: {F.sigmoid(model.V1.alpha):.6f}, V2: {F.sigmoid(model.V2.alpha):.6f}, V4: {F.sigmoid(model.V4.alpha):.6f}")
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(
@@ -378,7 +405,7 @@ def main():
         image_visibility=args.image_visibility,
         target_type="both",
     )
-    model = hConvRNN()
+    model = lrRNN(rank=args.rank)
     train(
         model=model,
         train_loader=train_loader,
@@ -411,7 +438,9 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--max_val_batches", type=int, default=None)
     parser.add_argument("--data_dir", type=str, default=str(DATADIR))
-    parser.add_argument("--log_dir", type=str, default=RNN_logs)
+    parser.add_argument("--log_dir", type=str, default=lrRNN_logs)
+    parser.add_argument("--rank", type=int, default=8)
+    parser.add_argument("--num_examples", type=int, default=5)
     return parser
 
 if __name__ == "__main__":

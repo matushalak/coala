@@ -90,12 +90,115 @@ def test_msmnist_loader_outputs_centered_range(monkeypatch):
     _assert_msmnist_loader_outputs_centered_range()
 
 
+def test_msmnist_noise_sigma_reaches_masked_sequence(monkeypatch):
+    import torchvision
+
+    from coala.datasets.msmnist import msmnist
+
+    monkeypatch.setattr(torchvision.datasets, "MNIST", _DummyMNIST)
+    train_loader, _, _ = msmnist(
+        batch_size=2,
+        num_workers=0,
+        download=False,
+        patch_size=4,
+        mask_ratio=1.0,
+        masked_fill="random",
+        noise_sigma=0.0,
+        number_of_masks=1,
+        timesteps_per_mask=1,
+        target_type="image",
+    )
+    masked_imgs, _ = next(iter(train_loader))
+    assert torch.count_nonzero(masked_imgs) == 0
+
+
+def test_msmnist_num_digits_and_image_visibility(monkeypatch):
+    import torchvision
+
+    from coala.datasets.msmnist import msmnist
+
+    monkeypatch.setattr(torchvision.datasets, "MNIST", _DummyMNIST)
+    torch.manual_seed(0)
+    train_loader, _, _ = msmnist(
+        batch_size=2,
+        num_workers=0,
+        download=False,
+        patch_size=4,
+        mask_ratio=0.5,
+        masked_fill=0.0,
+        noise_sigma=0.0,
+        number_of_masks=2,
+        timesteps_per_mask=2,
+        num_digits=3,
+        image_visibility="first",
+        target_type="both",
+    )
+
+    masked_imgs, targets = next(iter(train_loader))
+    assert masked_imgs.shape == (2, 12, 1, 28, 28)
+    assert targets["image"].shape == (2, 12, 1, 28, 28)
+    assert targets["label"].shape == (2, 12)
+
+    segment_len = 4
+    for digit_idx in range(3):
+        start = digit_idx * segment_len
+        end = start + segment_len
+        label_slice = targets["label"][0, start:end]
+        assert torch.all(label_slice == label_slice[0])
+
+    assert len(set(targets["label"][0, ::segment_len].tolist())) == 3
+    assert torch.all(masked_imgs[:, 1:4] == -1.0)
+    assert torch.all(masked_imgs[:, 5:8] == -1.0)
+    assert torch.all(masked_imgs[:, 9:12] == -1.0)
+
+
 if __name__ == "__main__":
     import torchvision
     from unittest.mock import patch
 
+    from coala.datasets.msmnist import msmnist
+
     with patch.object(torchvision.datasets, "MNIST", _DummyMNIST):
         _assert_mnist_loader_outputs_centered_range()
         _assert_msmnist_loader_outputs_centered_range()
+
+        train_loader, _, _ = msmnist(
+            batch_size=2,
+            num_workers=0,
+            download=False,
+            patch_size=4,
+            mask_ratio=1.0,
+            masked_fill="random",
+            noise_sigma=0.0,
+            number_of_masks=1,
+            timesteps_per_mask=1,
+            target_type="image",
+        )
+        masked_imgs, _ = next(iter(train_loader))
+        assert torch.count_nonzero(masked_imgs) == 0
+
+        torch.manual_seed(0)
+        train_loader, _, _ = msmnist(
+            batch_size=2,
+            num_workers=0,
+            download=False,
+            patch_size=4,
+            mask_ratio=0.5,
+            masked_fill=0.0,
+            noise_sigma=0.0,
+            number_of_masks=2,
+            timesteps_per_mask=2,
+            num_digits=3,
+            image_visibility="first",
+            target_type="both",
+        )
+        masked_imgs, targets = next(iter(train_loader))
+        assert masked_imgs.shape == (2, 12, 1, 28, 28)
+        assert targets["image"].shape == (2, 12, 1, 28, 28)
+        assert targets["label"].shape == (2, 12)
+        assert len(set(targets["label"][0, ::4].tolist())) == 3
+        assert torch.all(masked_imgs[:, 1:4] == -1.0)
+        assert torch.all(masked_imgs[:, 5:8] == -1.0)
+        assert torch.all(masked_imgs[:, 9:12] == -1.0)
 
     print("MNIST/MSMNIST dataset tests passed.")
