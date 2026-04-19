@@ -13,3 +13,13 @@ def load_checkpoint(
     if any(k.startswith("model.") for k in state_dict):
         state_dict = {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")}
     return model.load_state_dict(state_dict, strict=strict)
+
+def calculate_conv_params(in_resolution:int, out_resolution:int, kernel_size:int|None, ) -> tuple[int, int, int]:
+    '''
+    Calculate (transposed) convolution layer parameters (kernel_size, stride, padding) 
+    to transform from in_resolution to out_resolution given 
+        in_resolution, 
+        out_resolution, and 
+        two of the remaining parameters.
+    '''
+    # TODO

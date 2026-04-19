@@ -223,7 +223,7 @@ class MaskedSequentialDataset(data.Dataset):
 
         img_t = img.unsqueeze(0).expand(self.timeframes_per_digit, -1, -1, -1)
         noise = (self.noise_sigma * torch.randn_like(img_t)).clamp_(-1.0, 1.0)
-        visible = img_t + (noise / 2) if self.visible_corrupt else img_t
+        visible = img_t + noise if self.visible_corrupt else img_t
         if self.masked_fill_mode == "random":
             masked_imgs = torch.where(keep, visible, noise)
         else:

@@ -16,9 +16,13 @@ class EMA(torch.nn.Module):
     If basline is provided, decay towards baseline in absence of input; 
         otherwise, decay towards 0.
     '''
-    def __init__(self, shape:tuple, alpha:float = 0.1, baseline:torch.Tensor | None = None):
+    def __init__(self, shape:tuple, alpha:float = 0.1, baseline:torch.Tensor | None = None,
+                 learnable_alpha:bool = False, matrix_alpha:bool = False):
         super().__init__()
-        self.alpha = torch.nn.Parameter(torch.tensor(alpha), requires_grad=False)
+        if matrix_alpha:
+            self.alpha = torch.nn.Parameter(torch.full(shape, alpha), requires_grad=learnable_alpha)
+        else:
+            self.alpha = torch.nn.Parameter(torch.tensor(alpha), requires_grad=learnable_alpha)
         self.register_buffer("baseline", baseline if baseline is not None else torch.zeros(shape, requires_grad=False))
         self.register_buffer("ema", self.baseline.clone())
     

@@ -13,6 +13,7 @@ JEPA_logs = str(PACKAGE_ROOT / "logs" / "JEPA_logs")
 LeJEPA_logs = str(PACKAGE_ROOT / "logs" / "LeJEPA_logs")
 COALA_logs = str(PACKAGE_ROOT / "logs" / "COALA_logs")
 RNN_logs = str(PACKAGE_ROOT / "logs" / "RNN")
+hcRNN_logs = str(PACKAGE_ROOT / "logs" / "hcRNN")
 lrRNN_logs = str(PACKAGE_ROOT / "logs" / "lrRNN")
 Head_logs = str(PACKAGE_ROOT / "logs" / "TaskHeads_logs")
 Classifier_logs = str(PACKAGE_ROOT / "logs" / "TaskHeads_logs" / "classifier")
@@ -58,6 +59,7 @@ __all__ = [
     "LeJEPA_logs",
     "COALA_logs",
     "RNN_logs",
+    "hcRNN_logs",
     "lrRNN_logs",
     "Head_logs",
     "Classifier_logs",
