@@ -336,6 +336,7 @@ class ConvNetDecoderStage(nn.Module):
         if self.transition is not None:
             x = self.transition(x)
         if skip is not None:
+            # this should be x = act(x+skip)
             x = x + skip
         return self.local_stage(x)
 

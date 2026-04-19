@@ -370,6 +370,7 @@ def _latest_checkpoint(pattern: str | Path) -> str | None:
 
 
 DEFAULT_PRETRAINED_CHECKPOINT_PATH = _latest_checkpoint(dataset_lightning_logs_dir(MAE_logs, "mnist"))
+print(f"Using pretrained checkpoint: {DEFAULT_PRETRAINED_CHECKPOINT_PATH}")
 DEFAULT_RECONSTRUCTION_HEAD_CHECKPOINT_PATH = _latest_checkpoint(Path(Head_logs) / "reconstruction" / "mnist" / "lightning_logs")
 DEFAULT_CLASSIFIER_CHECKPOINT_PATH = _latest_checkpoint(Path(Classifier_logs) / "mnist" / "lightning_logs")
 

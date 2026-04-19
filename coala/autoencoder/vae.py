@@ -1,0 +1,1 @@
+# builds vae from cnn blocks

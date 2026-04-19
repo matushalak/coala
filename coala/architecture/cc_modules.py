@@ -166,7 +166,7 @@ class CCModule(nn.Module):
         
         # Summation
         drive = (
-            # y_FF
+            y_FF
             + y_FB
             # - self.Lambda_LAT(y_LAT)
             )
