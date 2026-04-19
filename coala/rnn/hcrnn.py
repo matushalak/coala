@@ -53,9 +53,19 @@ class hConvRNN(nn.Module):
 
         self.act = F.relu
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_activation_maps: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]]]:
         recon = []
         class_logits = []
+        activation_maps = None
+        if return_activation_maps:
+            activation_maps = {
+                signal_name: {f"L{i}": [] for i in range(4)}
+                for signal_name in ("Y", "y_FF", "y_FB")
+            }
 
         self.V0.reset_state(batch_size=x.shape[0])
         self.V1.reset_state(batch_size=x.shape[0])
@@ -77,17 +87,45 @@ class hConvRNN(nn.Module):
             V2_fb = self.W_v2FB(self.V4.ema)
             # V4
             V4_ff = self.W_v4FF(self.V2.ema)
+            V4_fb = torch.zeros_like(V4_ff)
             
             # All activations at once
             self.V0(self.W_v0local(self.act(V0_ff + V0_fb)))
             self.V1(self.W_v1local(self.act(V1_ff + V1_fb)))
             self.V2(self.W_v2local(self.act(V2_ff + V2_fb)))
             self.V4(self.W_v4local(self.act(V4_ff)))
+
+            if activation_maps is not None:
+                activation_maps["Y"]["L0"].append(self.V0.ema.mean(dim=1))
+                activation_maps["y_FF"]["L0"].append(V0_ff.mean(dim=1))
+                activation_maps["y_FB"]["L0"].append(V0_fb.mean(dim=1))
+                activation_maps["Y"]["L1"].append(self.V1.ema.mean(dim=1))
+                activation_maps["y_FF"]["L1"].append(V1_ff.mean(dim=1))
+                activation_maps["y_FB"]["L1"].append(V1_fb.mean(dim=1))
+                activation_maps["Y"]["L2"].append(self.V2.ema.mean(dim=1))
+                activation_maps["y_FF"]["L2"].append(V2_ff.mean(dim=1))
+                activation_maps["y_FB"]["L2"].append(V2_fb.mean(dim=1))
+                activation_maps["Y"]["L3"].append(self.V4.ema.mean(dim=1))
+                activation_maps["y_FF"]["L3"].append(V4_ff.mean(dim=1))
+                activation_maps["y_FB"]["L3"].append(V4_fb.mean(dim=1))
             
             recon.append(self.W_recon(self.V1.ema))
             class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
-
-        return torch.stack(recon, dim=1), torch.stack(class_logits, dim=1)
+        recon_tensor = torch.stack(recon, dim=1)
+        class_logits_tensor = torch.stack(class_logits, dim=1)
+        if activation_maps is None:
+            return recon_tensor, class_logits_tensor
+        return {
+            "recon": recon_tensor,
+            "class_logits": class_logits_tensor,
+            "activation_maps": {
+                signal_name: {
+                    layer_name: torch.stack(layer_maps, dim=1)
+                    for layer_name, layer_maps in per_signal_maps.items()
+                }
+                for signal_name, per_signal_maps in activation_maps.items()
+            },
+        }
 
 
 def prepare_batch(

@@ -24,6 +24,7 @@ class RNN(nn.Module):
                  conv_inout: bool = False):
         super().__init__()
         self.hidden_resolution = hidden_resolution
+        self.hidden_features = hidden_features
         self.conv_inout = conv_inout
         if conv_inout:
             self.W_input = nn.Conv2d(input_features, hidden_features, kernel_size=7, padding=0, stride=7)
@@ -47,9 +48,19 @@ class RNN(nn.Module):
     def full_connectivity_matrix(self) -> torch.Tensor:
         return self.W_recurrent.weight
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_activation_maps: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]]]:
         recon = []
         class_logits = []
+        activation_maps = None
+        if return_activation_maps:
+            activation_maps = {
+                signal_name: {"L0": []}
+                for signal_name in ("Y", "y_FF", "y_FB")
+            }
 
         self.hidden.reset_state(batch_size=x.shape[0])
         network_state = torch.zeros(x.shape[0], self.hidden.ema.shape[1], device=x.device)
@@ -66,14 +77,34 @@ class RNN(nn.Module):
             
             # Compute activations and temporally integrate
             network_state = self.hidden(self.act(FF+FB))
+            if activation_maps is not None:
+                ff_map = FF.view(x_t.shape[0], self.hidden_features, self.hidden_resolution, self.hidden_resolution)
+                fb_map = FB.view(x_t.shape[0], self.hidden_features, self.hidden_resolution, self.hidden_resolution)
+                y_map = network_state.view(x_t.shape[0], self.hidden_features, self.hidden_resolution, self.hidden_resolution)
+                activation_maps["Y"]["L0"].append(y_map.mean(dim=1))
+                activation_maps["y_FF"]["L0"].append(ff_map.mean(dim=1))
+                activation_maps["y_FB"]["L0"].append(fb_map.mean(dim=1))
             if self.conv_inout:
                 recon.append(self.W_recon(network_state.view(x_t.shape[0], -1, self.hidden_resolution, self.hidden_resolution)
                                           ).view(x_t.shape))
             else:
                 recon.append(self.W_recon(self.hidden.ema).view(x_t.shape))
             class_logits.append(self.W_class(self.hidden.ema.squeeze(-1).squeeze(-1)))
-
-        return torch.stack(recon, dim=1), torch.stack(class_logits, dim=1)
+        recon_tensor = torch.stack(recon, dim=1)
+        class_logits_tensor = torch.stack(class_logits, dim=1)
+        if activation_maps is None:
+            return recon_tensor, class_logits_tensor
+        return {
+            "recon": recon_tensor,
+            "class_logits": class_logits_tensor,
+            "activation_maps": {
+                signal_name: {
+                    layer_name: torch.stack(layer_maps, dim=1)
+                    for layer_name, layer_maps in per_signal_maps.items()
+                }
+                for signal_name, per_signal_maps in activation_maps.items()
+            },
+        }
 
 
 def prepare_batch(

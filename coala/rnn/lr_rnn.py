@@ -24,6 +24,9 @@ class lrRNN(nn.Module):
     def __init__(self, input_features: int = 1, V1_features: int = 16, V2_features: int = 32, V4_features: int = 256,
                  rank:int = 4):
         super().__init__()
+        self.V1_features = V1_features
+        self.V2_features = V2_features
+        self.V4_features = V4_features
         
         self.W_input = nn.Linear(28*28*input_features, 14*14*V1_features)
         self.W_recon = nn.Linear(14*14*V1_features, 28*28*input_features)
@@ -49,9 +52,19 @@ class lrRNN(nn.Module):
     def full_connectivity_matrix(self) -> torch.Tensor:
         return self.W_R.weight @ self.W_L.weight
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_activation_maps: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]]]:
         recon = []
         class_logits = []
+        activation_maps = None
+        if return_activation_maps:
+            activation_maps = {
+                signal_name: {f"L{i}": [] for i in range(3)}
+                for signal_name in ("Y", "y_FF", "y_FB")
+            }
 
         self.V1.reset_state(batch_size=x.shape[0])
         self.V2.reset_state(batch_size=x.shape[0])
@@ -63,7 +76,8 @@ class lrRNN(nn.Module):
             x_t = x[:, t]
             
             # Compute interactions
-            network_state = self.W_R(self.W_L(network_state))
+            recurrent_drive = self.W_R(self.W_L(network_state))
+            network_state = recurrent_drive
             # Give input to network
             V1_ff = self.W_input(x_t.view(x_t.shape[0], -1))
             network_state[:, self.V1_slice] += V1_ff
@@ -75,10 +89,57 @@ class lrRNN(nn.Module):
             network_state[:, self.V2_slice] = self.V2(network_state[:, self.V2_slice])
             network_state[:, self.V4_slice] = self.V4(network_state[:, self.V4_slice])
 
+            if activation_maps is not None:
+                zeros_v2 = torch.zeros(
+                    x_t.shape[0],
+                    self.V2_features,
+                    7,
+                    7,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                zeros_v4 = torch.zeros(
+                    x_t.shape[0],
+                    self.V4_features,
+                    1,
+                    1,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                v1_y = self.V1.ema.view(x_t.shape[0], self.V1_features, 14, 14)
+                v2_y = self.V2.ema.view(x_t.shape[0], self.V2_features, 7, 7)
+                v4_y = self.V4.ema.view(x_t.shape[0], self.V4_features, 1, 1)
+                v1_fb = recurrent_drive[:, self.V1_slice].view(x_t.shape[0], self.V1_features, 14, 14)
+                v2_fb = recurrent_drive[:, self.V2_slice].view(x_t.shape[0], self.V2_features, 7, 7)
+                v4_fb = recurrent_drive[:, self.V4_slice].view(x_t.shape[0], self.V4_features, 1, 1)
+                v1_ff_map = V1_ff.view(x_t.shape[0], self.V1_features, 14, 14)
+                activation_maps["Y"]["L0"].append(v1_y.mean(dim=1))
+                activation_maps["y_FF"]["L0"].append(v1_ff_map.mean(dim=1))
+                activation_maps["y_FB"]["L0"].append(v1_fb.mean(dim=1))
+                activation_maps["Y"]["L1"].append(v2_y.mean(dim=1))
+                activation_maps["y_FF"]["L1"].append(zeros_v2.mean(dim=1))
+                activation_maps["y_FB"]["L1"].append(v2_fb.mean(dim=1))
+                activation_maps["Y"]["L2"].append(v4_y.mean(dim=1))
+                activation_maps["y_FF"]["L2"].append(zeros_v4.mean(dim=1))
+                activation_maps["y_FB"]["L2"].append(v4_fb.mean(dim=1))
+
             recon.append(self.W_recon(self.V1.ema).view(x_t.shape))
             class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
-
-        return torch.stack(recon, dim=1), torch.stack(class_logits, dim=1)
+        recon_tensor = torch.stack(recon, dim=1)
+        class_logits_tensor = torch.stack(class_logits, dim=1)
+        if activation_maps is None:
+            return recon_tensor, class_logits_tensor
+        return {
+            "recon": recon_tensor,
+            "class_logits": class_logits_tensor,
+            "activation_maps": {
+                signal_name: {
+                    layer_name: torch.stack(layer_maps, dim=1)
+                    for layer_name, layer_maps in per_signal_maps.items()
+                }
+                for signal_name, per_signal_maps in activation_maps.items()
+            },
+        }
 
 
 def prepare_batch(
