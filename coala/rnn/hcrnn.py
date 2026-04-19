@@ -13,6 +13,7 @@ from tqdm import tqdm
 from coala import DATADIR, hcRNN_logs, dataset_log_dir
 from coala.datasets import get_dataloaders
 from coala.rnn.utils import EMA
+from coala.autoencoder.cnn import ResidualMLP
 
 # TODO
 # try staged approach: first only train on clean images
@@ -27,16 +28,20 @@ class hConvRNN(nn.Module):
     def __init__(self, input_features: int = 1, V0_features:int = 8, V1_features: int = 16, V2_features: int = 32, V4_features: int = 64):
         super().__init__()
         
+        self.W_v0local = ResidualMLP(V0_features)
         self.W_v0FF = nn.Conv2d(input_features, V0_features, kernel_size=3, padding=1, stride=1)
         self.W_v0FB = nn.ConvTranspose2d(V1_features, V0_features, kernel_size=5, padding=2, stride=2, output_padding=1)
         
+        self.W_v1local = ResidualMLP(V1_features)
         self.W_v1FF = nn.Conv2d(V0_features, V1_features, kernel_size=5, padding=2, stride=2)
         self.W_v1FB = nn.ConvTranspose2d(V2_features, V1_features, kernel_size=3, padding=1, stride=2, output_padding=1)
         self.W_recon = nn.ConvTranspose2d(V1_features, input_features, kernel_size=5, padding=2, stride=2, output_padding=1)
         
+        self.W_v2local = ResidualMLP(V2_features)
         self.W_v2FF = nn.Conv2d(V1_features, V2_features, kernel_size=3, padding=1, stride=2)
         self.W_v2FB = nn.ConvTranspose2d(V4_features, V2_features, kernel_size=7, padding=0, stride=1)
 
+        self.W_v4local = ResidualMLP(V4_features)
         self.W_v4FF = nn.Conv2d(V2_features, V4_features, kernel_size=7, padding=0, stride=1)
         self.W_class = nn.Linear(V4_features, 10)
 
@@ -74,10 +79,10 @@ class hConvRNN(nn.Module):
             V4_ff = self.W_v4FF(self.V2.ema)
             
             # All activations at once
-            self.V0(self.act(V0_ff + V0_fb))
-            self.V1(self.act(V1_ff + V1_fb))
-            self.V2(self.act(V2_ff + V2_fb))
-            self.V4(self.act(V4_ff))
+            self.V0(self.W_v0local(self.act(V0_ff + V0_fb)))
+            self.V1(self.W_v1local(self.act(V1_ff + V1_fb)))
+            self.V2(self.W_v2local(self.act(V2_ff + V2_fb)))
+            self.V4(self.W_v4local(self.act(V4_ff)))
             
             recon.append(self.W_recon(self.V1.ema))
             class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
@@ -127,13 +132,14 @@ def compute_losses(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     target_recon = expand_clean_targets(clean_image, recon.shape[1])
     target_labels = expand_label_targets(labels, class_logits.shape[1])
-    recon_loss = F.mse_loss(recon, target_recon, reduction = 'none')
+    # recon_loss = F.mse_loss(recon, target_recon, reduction = 'none') # l2
+    recon_loss = F.smooth_l1_loss(recon, target_recon, reduction = 'none')
     class_loss = F.cross_entropy(class_logits.view(-1, class_logits.shape[-1]),target_labels.reshape(-1),
                                  reduction='none').view(class_logits.shape[0], class_logits.shape[1])
     weights = torch.linspace(t0_weight, 1.0, steps=recon.shape[1], device=recon.device)
     recon_loss = (recon_loss.mean(dim=[2, 3, 4]) * weights).mean()
     class_loss = (class_loss * weights).mean()
-    return recon_loss, class_loss, recon_loss + class_loss
+    return recon_loss, class_loss, recon_loss #+ class_loss
 
 
 def make_reconstruction_grid(

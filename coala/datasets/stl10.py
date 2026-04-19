@@ -104,3 +104,6 @@ def download_stl10(root: str | Path = DATADIR, include_unlabeled: bool = True) -
     for split in splits:
         torchvision.datasets.STL10(root=data_root, split=split, download=True)
     return data_root
+
+if __name__ == "__main__":
+    download_stl10()
