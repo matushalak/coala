@@ -25,12 +25,16 @@ def _parse_corruptions(corruptions: str | tuple[str, ...] | list[str] | None) ->
         values = [value.strip() for value in corruptions.split(",")]
     else:
         values = [str(value).strip() for value in corruptions]
-    parsed = tuple(value for value in values if value)
-    allowed = {"mask", "gaussian", "mix", "salt_pepper", "blur"}
+    aliases = {
+        "gaussian_mix_blur": "mix_blur",
+        "gaussian_mix_noise_blur": "mix_blur",
+    }
+    parsed = tuple(aliases.get(value, value) for value in values if value)
+    allowed = {"mask", "gaussian", "mix", "salt_pepper", "blur", "mix_blur"}
     invalid = sorted({value for value in parsed if value not in allowed})
     if invalid:
         raise ValueError(
-            "corruptions must contain only: 'mask', 'gaussian', 'mix', 'salt_pepper', 'blur'."
+            "corruptions must contain only: 'mask', 'gaussian', 'mix', 'salt_pepper', 'blur', 'mix_blur'."
         )
     return parsed
 
@@ -440,6 +444,9 @@ class CorruptedSequentialDataset(data.Dataset):
         kernel = kernel.expand(channels, 1, -1, -1)
         return F.conv2d(imgs, kernel, padding=kernel.shape[-1] // 2, groups=channels)
 
+    def _apply_mix_blur_corruption(self, imgs: torch.Tensor) -> torch.Tensor:
+        return self._apply_blur_corruption(self._apply_mix_corruption(imgs))
+
     def _apply_corruption(self, imgs: torch.Tensor, corruption: str) -> torch.Tensor:
         if corruption == "gaussian":
             return self._apply_gaussian_corruption(imgs)
@@ -449,13 +456,15 @@ class CorruptedSequentialDataset(data.Dataset):
             return self._apply_salt_pepper_corruption(imgs)
         if corruption == "blur":
             return self._apply_blur_corruption(imgs)
+        if corruption == "mix_blur":
+            return self._apply_mix_blur_corruption(imgs)
         raise ValueError(f"Unsupported corruption: {corruption!r}")
 
     def _apply_corruption_plan(self, imgs: torch.Tensor, plan: tuple[str, ...]) -> torch.Tensor:
         corrupted = imgs
         for corruption in plan:
             corrupted = self._apply_corruption(corrupted, corruption)
-        return corrupted.clamp_(self.signal_min_value, self.signal_max_value)
+        return corrupted.clamp(self.signal_min_value, self.signal_max_value)
 
     def _sample_component_indices(self, idx: int, base_label: int) -> list[int]:
         if self.num_digits == 1:
