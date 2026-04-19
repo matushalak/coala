@@ -68,7 +68,7 @@ class ResidualMLP(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(n_channels, n_channels * 4, kernel_size=1, stride=1, padding=0),
-            self.activation_fn,
+            nn.ReLU(),
             norms.GlobalResponseNorm(n_channels * 4),
             nn.Conv2d(n_channels * 4, n_channels, kernel_size=1, stride=1, padding=0)
             )
@@ -109,6 +109,16 @@ class UpConv2d(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.upconv(x)
 
+class ConvNetLocalStage(nn.Module):
+    def __init__(self, n_channels: int, depth: int = 1):
+        super().__init__()
+        self.local_stage = nn.Sequential(*[
+            ResidualMLP(n_channels) for _ in range(depth)
+        ])
+        self.activation_fn = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.local_stage(x)
 
 class ConvNetEncoderStage(nn.Module):
     def __init__(
@@ -116,7 +126,7 @@ class ConvNetEncoderStage(nn.Module):
         in_channels: int,
         out_channels: int,
         input_spatial_shape: tuple[int, int],
-        depth: int = 1,
+        local_stage:ConvNetLocalStage,
         transition_kernel_size: int = 3,
         transition_stride: int = 2,
         transition_padding: int | None = None,
@@ -139,9 +149,7 @@ class ConvNetEncoderStage(nn.Module):
             stride=transition_stride,
             padding=transition_padding,
         )
-        self.local_stage = nn.Sequential(*[
-            SparseResidualMLP(out_channels) for _ in range(depth)
-        ])
+        self.local_stage = local_stage
 
         self.activation_fn = nn.ReLU()
 
@@ -161,7 +169,7 @@ class ConvNetDecoderStage(nn.Module):
         out_channels: int,
         input_spatial_shape: tuple[int, int],
         output_spatial_shape: tuple[int, int],
-        local_stage:nn.Sequential,
+        local_stage:ConvNetLocalStage,
         transition_kernel_size: int = 3,
         transition_stride: int = 2,
         transition_padding: int | None = None,
