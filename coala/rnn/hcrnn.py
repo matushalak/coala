@@ -31,11 +31,12 @@ class hConvRNN(nn.Module):
         self.W_v0local = ResidualMLP(V0_features)
         self.W_v0FF = nn.Conv2d(input_features, V0_features, kernel_size=3, padding=1, stride=1)
         self.W_v0FB = nn.ConvTranspose2d(V1_features, V0_features, kernel_size=5, padding=2, stride=2, output_padding=1)
-        
+        self.W_recon = nn.ConvTranspose2d(V0_features, input_features, kernel_size=3, padding=1, stride=1, output_padding=0)
+
         self.W_v1local = ResidualMLP(V1_features)
         self.W_v1FF = nn.Conv2d(V0_features, V1_features, kernel_size=5, padding=2, stride=2)
         self.W_v1FB = nn.ConvTranspose2d(V2_features, V1_features, kernel_size=3, padding=1, stride=2, output_padding=1)
-        self.W_recon = nn.ConvTranspose2d(V1_features, input_features, kernel_size=5, padding=2, stride=2, output_padding=1)
+        # self.W_recon = nn.ConvTranspose2d(V1_features, input_features, kernel_size=5, padding=2, stride=2, output_padding=1)
         
         self.W_v2local = ResidualMLP(V2_features)
         self.W_v2FF = nn.Conv2d(V1_features, V2_features, kernel_size=3, padding=1, stride=2)
@@ -46,10 +47,10 @@ class hConvRNN(nn.Module):
         self.W_class = nn.Linear(V4_features, 10)
 
         # Alphas go into sigmoid, so effective alpha is in (0, 1);
-        self.V0 = EMA((1, V0_features, 28, 28), alpha=0.0)
-        self.V1 = EMA((1, V1_features, 14, 14), alpha=-0.5)
-        self.V2 = EMA((1, V2_features, 7, 7), alpha=-1.0)
-        self.V4 = EMA((1, V4_features, 1, 1), alpha=-1.5)
+        self.V0 = EMA((1, V0_features, 28, 28), alpha=0.5)
+        self.V1 = EMA((1, V1_features, 14, 14), alpha=0.25)
+        self.V2 = EMA((1, V2_features, 7, 7), alpha=0.0)
+        self.V4 = EMA((1, V4_features, 1, 1), alpha=-0.5)
 
         self.act = F.relu
 
@@ -109,7 +110,8 @@ class hConvRNN(nn.Module):
                 activation_maps["y_FF"]["L3"].append(V4_ff.mean(dim=1))
                 activation_maps["y_FB"]["L3"].append(V4_fb.mean(dim=1))
             
-            recon.append(self.W_recon(self.V1.ema))
+            # recon.append(self.W_recon(self.V1.ema))
+            recon.append(self.W_recon(self.V0.ema))
             class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
         recon_tensor = torch.stack(recon, dim=1)
         class_logits_tensor = torch.stack(class_logits, dim=1)
@@ -171,7 +173,7 @@ def compute_losses(
     target_recon = expand_clean_targets(clean_image, recon.shape[1])
     target_labels = expand_label_targets(labels, class_logits.shape[1])
     # recon_loss = F.mse_loss(recon, target_recon, reduction = 'none') # l2
-    recon_loss = F.smooth_l1_loss(recon, target_recon, reduction = 'none')
+    recon_loss = F.smooth_l1_loss(recon, target_recon, reduction = 'none') # l1 if beta = 0 / huber if beta
     class_loss = F.cross_entropy(class_logits.view(-1, class_logits.shape[-1]),target_labels.reshape(-1),
                                  reduction='none').view(class_logits.shape[0], class_logits.shape[1])
     weights = torch.linspace(t0_weight, 1.0, steps=recon.shape[1], device=recon.device)

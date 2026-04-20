@@ -595,7 +595,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.set_defaults(download=True)
     parser.add_argument("--max_batches", default=None, type=int)
     parser.add_argument("--num_examples", default=None, type=int)
-    parser.add_argument("--max_time_steps", default=24, type=int)
+    parser.add_argument("--max_time_steps", default=100, type=int)
     parser.add_argument("--activation_map_sample_idx", default=0, type=int)
     parser.add_argument("--hide_input_grid", action="store_true")
     parser.add_argument("--hide_activation_maps", action="store_true")
