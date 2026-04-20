@@ -28,15 +28,16 @@ class hConvRNN(nn.Module):
     def __init__(self, input_features: int = 1, V0_features:int = 8, V1_features: int = 16, V2_features: int = 32, V4_features: int = 64):
         super().__init__()
         
-        self.W_v0local = ResidualMLP(V0_features)
-        self.W_v0FF = nn.Conv2d(input_features, V0_features, kernel_size=3, padding=1, stride=1)
-        self.W_v0FB = nn.ConvTranspose2d(V1_features, V0_features, kernel_size=5, padding=2, stride=2, output_padding=1)
-        self.W_recon = nn.ConvTranspose2d(V0_features, input_features, kernel_size=3, padding=1, stride=1, output_padding=0)
+        # self.W_v0local = ResidualMLP(V0_features)
+        # self.W_v0FF = nn.Conv2d(input_features, V0_features, kernel_size=3, padding=1, stride=1)
+        # self.W_v0FB = nn.ConvTranspose2d(V1_features, V0_features, kernel_size=5, padding=2, stride=2, output_padding=1)
+        # self.W_recon = nn.ConvTranspose2d(V0_features, input_features, kernel_size=3, padding=1, stride=1, output_padding=0)
 
         self.W_v1local = ResidualMLP(V1_features)
-        self.W_v1FF = nn.Conv2d(V0_features, V1_features, kernel_size=5, padding=2, stride=2)
+        # self.W_v1FF = nn.Conv2d(V0_features, V1_features, kernel_size=5, padding=2, stride=2)
+        self.W_v1FF = nn.Conv2d(input_features, V1_features, kernel_size=5, padding=2, stride=2)
         self.W_v1FB = nn.ConvTranspose2d(V2_features, V1_features, kernel_size=3, padding=1, stride=2, output_padding=1)
-        # self.W_recon = nn.ConvTranspose2d(V1_features, input_features, kernel_size=5, padding=2, stride=2, output_padding=1)
+        self.W_recon = nn.ConvTranspose2d(V1_features, input_features, kernel_size=5, padding=2, stride=2, output_padding=1)
         
         self.W_v2local = ResidualMLP(V2_features)
         self.W_v2FF = nn.Conv2d(V1_features, V2_features, kernel_size=3, padding=1, stride=2)
@@ -47,10 +48,10 @@ class hConvRNN(nn.Module):
         self.W_class = nn.Linear(V4_features, 10)
 
         # Alphas go into sigmoid, so effective alpha is in (0, 1);
-        self.V0 = EMA((1, V0_features, 28, 28), alpha=0.5)
-        self.V1 = EMA((1, V1_features, 14, 14), alpha=0.25)
-        self.V2 = EMA((1, V2_features, 7, 7), alpha=0.0)
-        self.V4 = EMA((1, V4_features, 1, 1), alpha=-0.5)
+        # self.V0 = EMA((1, V0_features, 28, 28), alpha=0.0)
+        self.V1 = EMA((1, V1_features, 14, 14), alpha=0.0)
+        self.V2 = EMA((1, V2_features, 7, 7), alpha=-1.0)
+        self.V4 = EMA((1, V4_features, 1, 1), alpha=-2.0)
 
         self.act = F.relu
 
@@ -64,11 +65,11 @@ class hConvRNN(nn.Module):
         activation_maps = None
         if return_activation_maps:
             activation_maps = {
-                signal_name: {f"L{i}": [] for i in range(4)}
+                signal_name: {f"L{i}": [] for i in range(1,4)}
                 for signal_name in ("Y", "y_FF", "y_FB")
             }
 
-        self.V0.reset_state(batch_size=x.shape[0])
+        # self.V0.reset_state(batch_size=x.shape[0])
         self.V1.reset_state(batch_size=x.shape[0])
         self.V2.reset_state(batch_size=x.shape[0])
         self.V4.reset_state(batch_size=x.shape[0])
@@ -78,10 +79,11 @@ class hConvRNN(nn.Module):
             
             # All inputs at once
             # V0
-            V0_ff = self.W_v0FF(x_t)
-            V0_fb = self.W_v0FB(self.V1.ema)
+            # V0_ff = self.W_v0FF(x_t)
+            # V0_fb = self.W_v0FB(self.V1.ema)
             # V1
-            V1_ff = self.W_v1FF(self.V0.ema)
+            # V1_ff = self.W_v1FF(self.V0.ema)
+            V1_ff = self.W_v1FF(x_t)
             V1_fb = self.W_v1FB(self.V2.ema)
             # V2
             V2_ff = self.W_v2FF(self.V1.ema)
@@ -91,15 +93,15 @@ class hConvRNN(nn.Module):
             V4_fb = torch.zeros_like(V4_ff)
             
             # All activations at once
-            self.V0(self.W_v0local(self.act(V0_ff + V0_fb)))
+            # self.V0(self.W_v0local(self.act(V0_ff + V0_fb)))
             self.V1(self.W_v1local(self.act(V1_ff + V1_fb)))
             self.V2(self.W_v2local(self.act(V2_ff + V2_fb)))
             self.V4(self.W_v4local(self.act(V4_ff)))
 
             if activation_maps is not None:
-                activation_maps["Y"]["L0"].append(self.V0.ema.mean(dim=1))
-                activation_maps["y_FF"]["L0"].append(V0_ff.mean(dim=1))
-                activation_maps["y_FB"]["L0"].append(V0_fb.mean(dim=1))
+                # activation_maps["Y"]["L0"].append(self.V0.ema.mean(dim=1))
+                # activation_maps["y_FF"]["L0"].append(V0_ff.mean(dim=1))
+                # activation_maps["y_FB"]["L0"].append(V0_fb.mean(dim=1))
                 activation_maps["Y"]["L1"].append(self.V1.ema.mean(dim=1))
                 activation_maps["y_FF"]["L1"].append(V1_ff.mean(dim=1))
                 activation_maps["y_FB"]["L1"].append(V1_fb.mean(dim=1))
@@ -110,8 +112,8 @@ class hConvRNN(nn.Module):
                 activation_maps["y_FF"]["L3"].append(V4_ff.mean(dim=1))
                 activation_maps["y_FB"]["L3"].append(V4_fb.mean(dim=1))
             
-            # recon.append(self.W_recon(self.V1.ema))
-            recon.append(self.W_recon(self.V0.ema))
+            recon.append(self.W_recon(self.V1.ema))
+            # recon.append(self.W_recon(self.V0.ema))
             class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
         recon_tensor = torch.stack(recon, dim=1)
         class_logits_tensor = torch.stack(class_logits, dim=1)
@@ -133,11 +135,19 @@ class hConvRNN(nn.Module):
 def prepare_batch(
     batch: tuple[torch.Tensor, dict[str, torch.Tensor]],
     device: torch.device,
+    rollout_length: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     x, targets = batch
     x = x.to(device)
     clean_image = targets["image"].to(device)
     labels = targets["label"].to(device)
+
+    if rollout_length is not None:
+        x = x[:, :rollout_length]
+        if clean_image.dim() == 5:
+            clean_image = clean_image[:, :rollout_length]
+        if labels.dim() == 2:
+            labels = labels[:, :rollout_length]
     return x, clean_image, labels
 
 
@@ -173,7 +183,7 @@ def compute_losses(
     target_recon = expand_clean_targets(clean_image, recon.shape[1])
     target_labels = expand_label_targets(labels, class_logits.shape[1])
     # recon_loss = F.mse_loss(recon, target_recon, reduction = 'none') # l2
-    recon_loss = F.smooth_l1_loss(recon, target_recon, reduction = 'none') # l1 if beta = 0 / huber if beta
+    recon_loss = F.smooth_l1_loss(recon, target_recon, reduction = 'none', beta = 0.0) # l1 if beta = 0 / huber if beta > 0
     class_loss = F.cross_entropy(class_logits.view(-1, class_logits.shape[-1]),target_labels.reshape(-1),
                                  reduction='none').view(class_logits.shape[0], class_logits.shape[1])
     weights = torch.linspace(t0_weight, 1.0, steps=recon.shape[1], device=recon.device)
@@ -346,7 +356,8 @@ def train(
             if max_train_batches is not None and batch_idx >= max_train_batches:
                 break
 
-            masked_inputs, clean_image, labels = prepare_batch(batch, device)
+            rollout_length = torch.randint(low=8, high=20, size=(1,), device=device).item()
+            masked_inputs, clean_image, labels = prepare_batch(batch, device, rollout_length=rollout_length)
             recon, class_logits = model(masked_inputs)
             recon_loss, class_loss, loss = compute_losses(recon, class_logits, clean_image, labels, t0_weight=args.t0_weight if args is not None else 0.5)
 
@@ -388,7 +399,9 @@ def train(
             f"val_class={val_class_loss:.4f}, "
             f"val_acc={val_accuracy_percent:.2f}%"
         )
-        print(f"Alpha values - V0: {F.sigmoid(model.V0.alpha):.6f}, V1: {F.sigmoid(model.V1.alpha):.6f}, V2: {F.sigmoid(model.V2.alpha):.6f}, V4: {F.sigmoid(model.V4.alpha):.6f}")
+        print("Alpha values -", 
+            #   f"V0: {F.sigmoid(model.V0.alpha):.6f},",
+              f"V1: {F.sigmoid(model.V1.alpha):.6f}, V2: {F.sigmoid(model.V2.alpha):.6f}, V4: {F.sigmoid(model.V4.alpha):.6f}")
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(

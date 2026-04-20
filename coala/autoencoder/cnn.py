@@ -47,11 +47,11 @@ class SparseResidualMLP(nn.Module):
     All spatial mixing is done in the Downsampling Module, this block solely performs local feature mixing with 1x1 convolutinos
         (equivalent to shared MLP across spatial locations). I.e. each cortical column is an MLP.
     '''
-    def __init__(self,n_channels: int,):
+    def __init__(self,n_channels: int,expansion_factor: int = 4):
         super().__init__()
-        self.conv1 = SparseConv2d(n_channels, n_channels * 4, kernel_size=1, stride=1, padding=0)
-        self.grn = norms.SparseGlobalResponseNorm(n_channels * 4)
-        self.conv2 = SparseConv2d(n_channels * 4, n_channels, kernel_size=1, stride=1, padding=0)
+        self.conv1 = SparseConv2d(n_channels, n_channels * expansion_factor, kernel_size=1, stride=1, padding=0)
+        self.grn = norms.SparseGlobalResponseNorm(n_channels * expansion_factor)
+        self.conv2 = SparseConv2d(n_channels * expansion_factor, n_channels, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x: torch.Tensor, keep_mask: torch.BoolTensor) -> torch.Tensor:
         mask = keep_mask.to(dtype=x.dtype)
@@ -64,13 +64,13 @@ class SparseResidualMLP(nn.Module):
 
 
 class ResidualMLP(nn.Module):
-    def __init__(self,n_channels: int,):
+    def __init__(self,n_channels: int, expansion_factor: int = 4):
         super().__init__()
         self.block = nn.Sequential(
-            nn.Conv2d(n_channels, n_channels * 4, kernel_size=1, stride=1, padding=0),
+            nn.Conv2d(n_channels, n_channels * expansion_factor, kernel_size=1, stride=1, padding=0),
             nn.ReLU(),
-            norms.GlobalResponseNorm(n_channels * 4),
-            nn.Conv2d(n_channels * 4, n_channels, kernel_size=1, stride=1, padding=0)
+            norms.GlobalResponseNorm(n_channels * expansion_factor),
+            nn.Conv2d(n_channels * expansion_factor, n_channels, kernel_size=1, stride=1, padding=0)
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
