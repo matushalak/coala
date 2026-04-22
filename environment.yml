@@ -18,5 +18,6 @@ dependencies:
   - scikit-learn
   - pip
   - pip:
+      - umap-learn
       - pytorch-lightning
       - -e .

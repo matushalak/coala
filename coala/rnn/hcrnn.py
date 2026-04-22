@@ -15,6 +15,8 @@ from coala.datasets import get_dataloaders
 from coala.rnn.utils import EMA
 from coala.autoencoder.cnn import ResidualMLP
 
+from coala.hopfield import HopfieldLayer
+
 # TODO
 # try staged approach: first only train on clean images
 # then denoise
@@ -25,7 +27,8 @@ class hConvRNN(nn.Module):
     Simplest possible hierarchical Conv RNN architecture.
     """
 
-    def __init__(self, input_features: int = 1, V0_features:int = 8, V1_features: int = 16, V2_features: int = 32, V4_features: int = 64):
+    def __init__(self, input_features: int = 1, V0_features:int = 8, V1_features: int = 16, V2_features: int = 32, V4_features: int = 64,
+                 hopfield:bool = True):
         super().__init__()
         
         # self.W_v0local = ResidualMLP(V0_features)
@@ -46,6 +49,17 @@ class hConvRNN(nn.Module):
         self.W_v4local = ResidualMLP(V4_features)
         self.W_v4FF = nn.Conv2d(V2_features, V4_features, kernel_size=7, padding=0, stride=1)
         self.W_class = nn.Linear(V4_features, 10)
+        
+        if hopfield:
+            self.Hopfield_lookup = HopfieldLayer(input_size=V4_features,
+                                                hidden_size=V4_features,
+                                                pattern_size=V4_features,
+                                                quantity=V4_features,
+                                                stored_pattern_as_static=True,
+                                                state_pattern_as_static=True,
+                                                lookup_weights_as_separated=True,
+                                                lookup_targets_as_trainable=True)
+
 
         # Alphas go into sigmoid, so effective alpha is in (0, 1);
         # self.V0 = EMA((1, V0_features, 28, 28), alpha=0.0)
@@ -59,15 +73,19 @@ class hConvRNN(nn.Module):
         self,
         x: torch.Tensor,
         return_activation_maps: bool = False,
+        return_layer_trajectories: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]]]:
         recon = []
         class_logits = []
         activation_maps = None
+        layer_trajectories = None
         if return_activation_maps:
             activation_maps = {
                 signal_name: {f"L{i}": [] for i in range(1,4)}
                 for signal_name in ("Y", "y_FF", "y_FB")
             }
+        if return_layer_trajectories:
+            layer_trajectories = {f"L{i}": [] for i in range(1,4)}
 
         # self.V0.reset_state(batch_size=x.shape[0])
         self.V1.reset_state(batch_size=x.shape[0])
@@ -96,7 +114,13 @@ class hConvRNN(nn.Module):
             # self.V0(self.W_v0local(self.act(V0_ff + V0_fb)))
             self.V1(self.W_v1local(self.act(V1_ff + V1_fb)))
             self.V2(self.W_v2local(self.act(V2_ff + V2_fb)))
-            self.V4(self.W_v4local(self.act(V4_ff)))
+            if hasattr(self, "Hopfield_lookup"):
+                self.V4(self.W_v4local(
+                    self.Hopfield_lookup(self.act(V4_ff).squeeze(-1).squeeze(-1).unsqueeze(1)
+                    ).view(self.V4.ema.shape[0], self.V4.ema.shape[1], 1, 1)))
+            else:
+                self.V4(self.W_v4local(self.act(V4_ff)))
+            
 
             if activation_maps is not None:
                 # activation_maps["Y"]["L0"].append(self.V0.ema.mean(dim=1))
@@ -111,25 +135,36 @@ class hConvRNN(nn.Module):
                 activation_maps["Y"]["L3"].append(self.V4.ema.mean(dim=1))
                 activation_maps["y_FF"]["L3"].append(V4_ff.mean(dim=1))
                 activation_maps["y_FB"]["L3"].append(V4_fb.mean(dim=1))
+            if layer_trajectories is not None:
+                layer_trajectories["L1"].append(self.V1.ema.flatten(start_dim=1))
+                layer_trajectories["L2"].append(self.V2.ema.flatten(start_dim=1))
+                layer_trajectories["L3"].append(self.V4.ema.flatten(start_dim=1))
             
             recon.append(self.W_recon(self.V1.ema))
             # recon.append(self.W_recon(self.V0.ema))
             class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
         recon_tensor = torch.stack(recon, dim=1)
         class_logits_tensor = torch.stack(class_logits, dim=1)
-        if activation_maps is None:
+        if activation_maps is None and layer_trajectories is None:
             return recon_tensor, class_logits_tensor
-        return {
+        result: dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]] | dict[str, torch.Tensor]] = {
             "recon": recon_tensor,
             "class_logits": class_logits_tensor,
-            "activation_maps": {
+        }
+        if activation_maps is not None:
+            result["activation_maps"] = {
                 signal_name: {
                     layer_name: torch.stack(layer_maps, dim=1)
                     for layer_name, layer_maps in per_signal_maps.items()
                 }
                 for signal_name, per_signal_maps in activation_maps.items()
-            },
-        }
+            }
+        if layer_trajectories is not None:
+            result["layer_trajectories"] = {
+                layer_name: torch.stack(layer_values, dim=1)
+                for layer_name, layer_values in layer_trajectories.items()
+            }
+        return result
 
 
 def prepare_batch(
@@ -444,7 +479,7 @@ def main():
         image_visibility=args.image_visibility,
         target_type="both",
     )
-    model = hConvRNN()
+    model = hConvRNN(hopfield=args.hopfield)
     train(
         model=model,
         train_loader=train_loader,
@@ -480,6 +515,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--log_dir", type=str, default=hcRNN_logs)
     parser.add_argument("--num_examples", type=int, default=5)
     parser.add_argument("--t0_weight", type=float, default=0.5)
+    parser.add_argument("--hopfield", action=argparse.BooleanOptionalAction, help="Whether to include the Hopfield layer in the architecture.")
     return parser
 
 if __name__ == "__main__":

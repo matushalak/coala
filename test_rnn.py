@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
+import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import torch
 from torchvision.utils import make_grid
+from tqdm import tqdm
 
 from coala import DATADIR, RNN_logs, hcRNN_logs, lrRNN_logs
 from coala.datasets import get_dataloaders
@@ -129,7 +134,7 @@ def _config_value(cli_value: Any, run_args: dict[str, Any], key: str, default: A
 
 def _build_model(family: str, run_args: dict[str, Any]) -> torch.nn.Module:
     if family == "hcrnn":
-        return hConvRNN()
+        return hConvRNN(hopfield=_coerce_bool(run_args.get("hopfield", False)))
     if family == "rnn":
         return RNN(conv_inout=_coerce_bool(run_args.get("conv_inout", False)))
     if family == "lrrnn":
@@ -427,11 +432,29 @@ def _compute_losses(
 
 def _extract_forward_outputs(
     model_output: tuple[torch.Tensor, torch.Tensor] | dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, dict[str, torch.Tensor]] | None]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    dict[str, dict[str, torch.Tensor]] | None,
+    dict[str, torch.Tensor] | None,
+]:
     if isinstance(model_output, dict):
-        return model_output["recon"], model_output["class_logits"], model_output.get("activation_maps")
+        return (
+            model_output["recon"],
+            model_output["class_logits"],
+            model_output.get("activation_maps"),
+            model_output.get("layer_trajectories"),
+        )
     recon, class_logits = model_output
-    return recon, class_logits, None
+    return recon, class_logits, None, None
+
+
+def _expand_label_targets(labels: torch.Tensor, n_steps: int) -> torch.Tensor:
+    if labels.dim() == 1:
+        return labels.unsqueeze(1).expand(-1, n_steps)
+    if labels.dim() == 2 and labels.shape[1] == n_steps:
+        return labels
+    raise ValueError(f"Expected labels with shape (B,) or (B, T), got {tuple(labels.shape)}.")
 
 
 @torch.no_grad()
@@ -443,16 +466,21 @@ def evaluate_model(
     run_args: dict[str, Any],
     max_batches: int | None = None,
     collect_activation_maps: bool = True,
+    classification: bool = False,
+    show_progress: bool = False,
 ) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
     total_recon_loss = 0.0
-    total_class_loss = 0.0
+    total_class_loss = 0.0 if classification else None
     total_samples = 0
-    correct_by_step = None
+    correct_by_step = None if classification else None
     visual_payload = None
 
-    for batch_idx, batch in enumerate(dataloader):
+    iterator = dataloader
+    if show_progress:
+        iterator = tqdm(dataloader, desc=f"Evaluating {family}", leave=False)
+    for batch_idx, batch in enumerate(iterator):
         if max_batches is not None and batch_idx >= max_batches:
             break
 
@@ -462,7 +490,7 @@ def evaluate_model(
         labels = targets["label"].to(device)
         need_maps = collect_activation_maps and visual_payload is None
         model_output = model(masked_inputs, return_activation_maps=need_maps)
-        recon, class_logits, activation_maps = _extract_forward_outputs(model_output)
+        recon, class_logits, activation_maps, _ = _extract_forward_outputs(model_output)
         recon_loss, class_loss, loss = _compute_losses(
             family=family,
             recon=recon,
@@ -473,20 +501,20 @@ def evaluate_model(
         )
 
         batch_size = masked_inputs.shape[0]
-        total_loss += loss.item() * batch_size
+        tracked_loss = loss if classification else recon_loss
+        total_loss += tracked_loss.item() * batch_size
         total_recon_loss += recon_loss.item() * batch_size
-        total_class_loss += class_loss.item() * batch_size
+        if total_class_loss is not None:
+            total_class_loss += class_loss.item() * batch_size
         total_samples += batch_size
 
-        preds = class_logits.argmax(dim=-1)
-        if labels.dim() == 1:
-            target_labels = labels.unsqueeze(1).expand(-1, class_logits.shape[1])
-        else:
-            target_labels = labels
-        matches = preds.eq(target_labels)
-        if correct_by_step is None:
-            correct_by_step = torch.zeros(class_logits.shape[1], dtype=torch.float32)
-        correct_by_step += matches.sum(dim=0).to(dtype=torch.float32).cpu()
+        if classification:
+            preds = class_logits.argmax(dim=-1)
+            target_labels = _expand_label_targets(labels, class_logits.shape[1])
+            matches = preds.eq(target_labels)
+            if correct_by_step is None:
+                correct_by_step = torch.zeros(class_logits.shape[1], dtype=torch.float32)
+            correct_by_step += matches.sum(dim=0).to(dtype=torch.float32).cpu()
 
         if visual_payload is None:
             visual_payload = {
@@ -506,19 +534,448 @@ def evaluate_model(
                 },
             }
 
-    if total_samples == 0 or correct_by_step is None:
+    if total_samples == 0:
         raise RuntimeError("No evaluation batches were processed.")
 
-    step_accuracy_percent = 100.0 * correct_by_step / total_samples
+    step_accuracy_percent = None if correct_by_step is None else 100.0 * correct_by_step / total_samples
     return {
         "mean_loss": total_loss / total_samples,
         "mean_recon_loss": total_recon_loss / total_samples,
-        "mean_class_loss": total_class_loss / total_samples,
+        "mean_class_loss": None if total_class_loss is None else total_class_loss / total_samples,
         "step_accuracy_percent": step_accuracy_percent,
-        "final_accuracy_percent": step_accuracy_percent[-1].item(),
+        "final_accuracy_percent": None if step_accuracy_percent is None else step_accuracy_percent[-1].item(),
         "num_samples": total_samples,
         "visual_payload": visual_payload,
     }
+
+
+def _trajectory_digit(label_sequence: torch.Tensor) -> int:
+    if label_sequence.dim() == 0:
+        return int(label_sequence.item())
+    if label_sequence.dim() == 1:
+        return int(label_sequence[0].item())
+    raise ValueError(f"Unsupported label sequence shape {tuple(label_sequence.shape)}")
+
+
+def collect_layer_trajectories(
+    model: torch.nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    n_traj_per_digit: int,
+    accepted_digits: list[int] | None = None,
+    max_batches: int | None = None,
+    show_progress: bool = False,
+) -> tuple[dict[str, list[tuple[int, torch.Tensor]]], dict[int, int]]:
+    if n_traj_per_digit <= 0:
+        return {}, {}
+
+    target_digits = list(range(10)) if accepted_digits is None else sorted({int(d) for d in accepted_digits})
+    per_digit_counts = {digit: 0 for digit in target_digits}
+    trajectories_by_layer: dict[str, list[tuple[int, torch.Tensor]]] = defaultdict(list)
+
+    model.eval()
+    iterator = dataloader
+    if show_progress:
+        iterator = tqdm(dataloader, desc="Collecting corrupted trajectories", leave=False)
+    for batch_idx, batch in enumerate(iterator):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+
+        masked_inputs, targets = batch
+        labels = targets["label"]
+        selected_indices: list[int] = []
+        selected_digits: list[int] = []
+        selected_in_batch = {digit: 0 for digit in target_digits}
+        for sample_idx in range(labels.shape[0]):
+            digit = _trajectory_digit(labels[sample_idx])
+            if digit not in per_digit_counts:
+                continue
+            if per_digit_counts[digit] + selected_in_batch[digit] >= n_traj_per_digit:
+                continue
+            selected_indices.append(sample_idx)
+            selected_digits.append(digit)
+            selected_in_batch[digit] += 1
+
+        if not selected_indices:
+            if all(count >= n_traj_per_digit for count in per_digit_counts.values()):
+                break
+            continue
+
+        selected_batch = masked_inputs[selected_indices].to(device)
+        model_output = model(selected_batch, return_layer_trajectories=True)
+        _, _, _, layer_trajectories = _extract_forward_outputs(model_output)
+        if layer_trajectories is None:
+            raise RuntimeError("Model did not return layer trajectories.")
+
+        for row_idx, digit in enumerate(selected_digits):
+            for layer_name, layer_tensor in layer_trajectories.items():
+                trajectories_by_layer[layer_name].append((digit, layer_tensor[row_idx].detach().cpu()))
+            per_digit_counts[digit] += 1
+
+        if all(count >= n_traj_per_digit for count in per_digit_counts.values()):
+            break
+
+    return dict(sorted(trajectories_by_layer.items())), per_digit_counts
+
+
+def collect_layer_fixed_points(
+    model: torch.nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    show_progress: bool = False,
+) -> dict[str, torch.Tensor]:
+    fixed_points_by_layer: dict[str, list[torch.Tensor]] = defaultdict(list)
+
+    model.eval()
+    iterator = dataloader
+    if show_progress:
+        iterator = tqdm(dataloader, desc="Collecting reference fixed points", leave=False)
+    for batch in iterator:
+        masked_inputs, _ = batch
+        batch_inputs = masked_inputs.to(device)
+        model_output = model(batch_inputs, return_layer_trajectories=True)
+        _, _, _, layer_trajectories = _extract_forward_outputs(model_output)
+        if layer_trajectories is None:
+            raise RuntimeError("Model did not return layer trajectories.")
+
+        for layer_name, layer_tensor in layer_trajectories.items():
+            fixed_points_by_layer[layer_name].append(layer_tensor[:, -1].detach().cpu())
+
+    return {
+        layer_name: torch.cat(layer_values, dim=0)
+        for layer_name, layer_values in sorted(fixed_points_by_layer.items())
+        if layer_values
+    }
+
+
+def _project_to_principal_components(points: torch.Tensor, n_components: int) -> torch.Tensor:
+    points = points.float()
+    if points.ndim != 2:
+        raise ValueError(f"Expected 2D points tensor, got {tuple(points.shape)}.")
+    if n_components <= 0:
+        raise ValueError(f"n_components must be positive, got {n_components}.")
+
+    n_samples, n_features = points.shape
+    target_dims = min(n_components, n_samples, n_features)
+    if target_dims == 0:
+        return torch.zeros((n_samples, n_components), dtype=torch.float32)
+
+    if target_dims == 1:
+        projected = points[:, :1] - points[:, :1].mean(dim=0, keepdim=True)
+    else:
+        centered = points - points.mean(dim=0, keepdim=True)
+        q = min(target_dims, centered.shape[0], centered.shape[1])
+        u, s, _ = torch.pca_lowrank(centered, q=q, center=False)
+        projected = u[:, :target_dims] * s[:target_dims]
+
+    if projected.shape[1] < n_components:
+        padding = torch.zeros((n_samples, n_components - projected.shape[1]), dtype=projected.dtype)
+        projected = torch.cat((projected, padding), dim=1)
+    return projected
+
+
+def _fit_single_pca_reducer(job: tuple[str, int, torch.Tensor]) -> tuple[str, dict[str, torch.Tensor]]:
+    layer_name, n_components, points = job
+    points = points.float()
+    mean = points.mean(dim=0, keepdim=True)
+    centered = points - mean
+    n_samples, n_features = centered.shape
+    target_dims = min(n_components, n_samples, n_features)
+    if target_dims <= 0:
+        components = torch.zeros((0, points.shape[1]), dtype=torch.float32)
+    elif target_dims == 1:
+        components = torch.zeros((1, points.shape[1]), dtype=torch.float32)
+        components[0, 0] = 1.0
+    else:
+        q = min(target_dims, centered.shape[0], centered.shape[1])
+        _, _, v = torch.pca_lowrank(centered, q=q, center=False)
+        components = v[:, :target_dims].T.contiguous()
+    return layer_name, {"mean": mean, "components": components}
+
+
+def _fit_pca_reducers(
+    reference_points_by_layer: dict[str, torch.Tensor],
+    n_components: int,
+    show_progress: bool = False,
+) -> dict[str, dict[str, torch.Tensor]]:
+    reducers: dict[str, dict[str, torch.Tensor]] = {}
+    jobs = [(layer_name, n_components, points) for layer_name, points in reference_points_by_layer.items()]
+    iterator = jobs
+    if show_progress:
+        iterator = tqdm(jobs, desc=f"Fitting PCA {n_components}D reducers", leave=False)
+    for job in iterator:
+        layer_name, reducer = _fit_single_pca_reducer(job)
+        reducers[layer_name] = reducer
+    return reducers
+
+
+def _transform_with_fitted_pca(
+    reducer: dict[str, torch.Tensor],
+    points: torch.Tensor,
+    n_components: int,
+) -> torch.Tensor:
+    centered = points.float() - reducer["mean"].float()
+    components = reducer["components"].float()
+    projected = centered @ components.T if components.numel() > 0 else torch.zeros((points.shape[0], 0), dtype=torch.float32)
+    if projected.shape[1] < n_components:
+        padding = torch.zeros((projected.shape[0], n_components - projected.shape[1]), dtype=projected.dtype)
+        projected = torch.cat((projected, padding), dim=1)
+    return projected
+
+
+def _umap_available() -> bool:
+    return importlib.util.find_spec("umap") is not None
+
+
+def _project_with_umap(points: torch.Tensor, n_components: int) -> torch.Tensor:
+    if not _umap_available():
+        raise ImportError("UMAP plots require the optional 'umap-learn' package.")
+
+    import umap
+
+    points = points.float()
+    if points.ndim != 2:
+        raise ValueError(f"Expected 2D points tensor, got {tuple(points.shape)}.")
+    if n_components <= 0:
+        raise ValueError(f"n_components must be positive, got {n_components}.")
+
+    reducer = umap.UMAP(n_components=n_components, random_state=42)
+    embedding = reducer.fit_transform(points.numpy())
+    projected = torch.from_numpy(embedding).to(dtype=torch.float32)
+    if projected.shape[1] < n_components:
+        padding = torch.zeros((projected.shape[0], n_components - projected.shape[1]), dtype=projected.dtype)
+        projected = torch.cat((projected, padding), dim=1)
+    return projected
+
+
+def _fit_umap_reducers(
+    reference_points_by_layer: dict[str, torch.Tensor],
+    n_components: int,
+) -> dict[str, Any]:
+    if not _umap_available():
+        return {}
+
+    import umap
+
+    reducers: dict[str, Any] = {}
+    for layer_name, points in reference_points_by_layer.items():
+        reducer = umap.UMAP(n_components=n_components, random_state=42)
+        reducer.fit(points.float().numpy())
+        reducers[layer_name] = reducer
+    return reducers
+
+
+def _fit_single_umap_reducer(job: tuple[str, int, Any]) -> tuple[str, Any]:
+    import warnings
+
+    import umap
+
+    layer_name, n_components, points = job
+    warnings.filterwarnings(
+        "ignore",
+        message=r"n_jobs value 1 overridden to 1 by setting random_state.*",
+        category=UserWarning,
+    )
+    reducer = umap.UMAP(n_components=n_components, random_state=42)
+    reducer.fit(points)
+    return layer_name, reducer
+
+
+def _fit_umap_reducers_parallel(
+    reference_points_by_layer: dict[str, torch.Tensor],
+    n_components: int,
+    show_progress: bool = False,
+) -> dict[str, Any]:
+    if not _umap_available() or not reference_points_by_layer:
+        return {}
+
+    jobs = [
+        (layer_name, n_components, points.float().numpy())
+        for layer_name, points in reference_points_by_layer.items()
+    ]
+    max_workers = min(len(jobs), max(1, os.cpu_count() or 1))
+    if max_workers <= 1:
+        return _fit_umap_reducers(reference_points_by_layer, n_components=n_components)
+
+    reducers: dict[str, Any] = {}
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        mapped = executor.map(_fit_single_umap_reducer, jobs)
+        if show_progress:
+            mapped = tqdm(
+                mapped,
+                total=len(jobs),
+                desc=f"Fitting UMAP {n_components}D reducers",
+                leave=False,
+            )
+        for layer_name, reducer in mapped:
+            reducers[layer_name] = reducer
+    return reducers
+
+
+def _transform_with_fitted_umap(reducer: Any, points: torch.Tensor, n_components: int) -> torch.Tensor:
+    projected = torch.from_numpy(reducer.transform(points.float().numpy())).to(dtype=torch.float32)
+    if projected.shape[1] < n_components:
+        padding = torch.zeros((projected.shape[0], n_components - projected.shape[1]), dtype=projected.dtype)
+        projected = torch.cat((projected, padding), dim=1)
+    return projected
+
+
+def create_layer_trajectory_pca_2d_figure(
+    layer_name: str,
+    trajectories: list[tuple[int, torch.Tensor]],
+    reducer: dict[str, torch.Tensor] | None = None,
+):
+    import matplotlib.pyplot as plt
+
+    if not trajectories or reducer is None:
+        return None
+
+    points = torch.cat([trajectory for _, trajectory in trajectories], dim=0)
+    projected = _transform_with_fitted_pca(reducer, points, n_components=2)
+
+    cmap = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    cursor = 0
+    legend_done: set[int] = set()
+    for digit, trajectory in trajectories:
+        n_steps = trajectory.shape[0]
+        coords = projected[cursor: cursor + n_steps]
+        cursor += n_steps
+        color = cmap(digit % 10)
+        label = f"digit {digit}" if digit not in legend_done else None
+        legend_done.add(digit)
+        ax.plot(coords[:, 0], coords[:, 1], color=color, alpha=0.85, linewidth=1.8, label=label)
+        ax.scatter(coords[0, 0], coords[0, 1], color=color, marker="o", s=28)
+        ax.scatter(coords[-1, 0], coords[-1, 1], color=color, marker="x", s=36)
+
+    ax.set_title(f"{layer_name} Activation Trajectories (2D PCA)")
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.grid(alpha=0.25)
+    if legend_done:
+        ax.legend(loc="best", ncols=2)
+    fig.tight_layout()
+    return fig
+
+
+def create_layer_trajectory_umap_2d_figure(
+    layer_name: str,
+    trajectories: list[tuple[int, torch.Tensor]],
+    reducer: Any | None = None,
+):
+    import matplotlib.pyplot as plt
+
+    if not trajectories or reducer is None:
+        return None
+
+    points = torch.cat([trajectory for _, trajectory in trajectories], dim=0)
+    projected = _transform_with_fitted_umap(reducer, points, n_components=2)
+
+    cmap = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    cursor = 0
+    legend_done: set[int] = set()
+    for digit, trajectory in trajectories:
+        n_steps = trajectory.shape[0]
+        coords = projected[cursor: cursor + n_steps]
+        cursor += n_steps
+        color = cmap(digit % 10)
+        label = f"digit {digit}" if digit not in legend_done else None
+        legend_done.add(digit)
+        ax.plot(coords[:, 0], coords[:, 1], color=color, alpha=0.85, linewidth=1.8, label=label)
+        ax.scatter(coords[0, 0], coords[0, 1], color=color, marker="o", s=28)
+        ax.scatter(coords[-1, 0], coords[-1, 1], color=color, marker="x", s=36)
+
+    ax.set_title(f"{layer_name} Activation Trajectories (2D UMAP)")
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+    ax.grid(alpha=0.25)
+    if legend_done:
+        ax.legend(loc="best", ncols=2)
+    fig.tight_layout()
+    return fig
+
+
+def create_layer_trajectory_pca_3d_figure(
+    layer_name: str,
+    trajectories: list[tuple[int, torch.Tensor]],
+    reducer: dict[str, torch.Tensor] | None = None,
+):
+    import matplotlib.pyplot as plt
+
+    if not trajectories or reducer is None:
+        return None
+
+    points = torch.cat([trajectory for _, trajectory in trajectories], dim=0)
+    projected = _transform_with_fitted_pca(reducer, points, n_components=3)
+
+    cmap = plt.get_cmap("tab10")
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    cursor = 0
+    legend_done: set[int] = set()
+    for digit, trajectory in trajectories:
+        n_steps = trajectory.shape[0]
+        coords = projected[cursor: cursor + n_steps]
+        cursor += n_steps
+        color = cmap(digit % 10)
+        label = f"digit {digit}" if digit not in legend_done else None
+        legend_done.add(digit)
+        ax.plot(coords[:, 0], coords[:, 1], coords[:, 2], color=color, alpha=0.8, linewidth=1.8, label=label)
+        ax.scatter(coords[0, 0], coords[0, 1], coords[0, 2], color=color, marker="o", s=28)
+        ax.scatter(coords[-1, 0], coords[-1, 1], coords[-1, 2], color=color, marker="x", s=36)
+
+    ax.set_title(f"{layer_name} Activation Trajectories (3D PCA)")
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_zlabel("PC3")
+    if legend_done:
+        ax.legend(loc="upper right", ncols=2)
+    fig.tight_layout()
+    return fig
+
+
+def create_layer_trajectory_umap_3d_figure(
+    layer_name: str,
+    trajectories: list[tuple[int, torch.Tensor]],
+    reducer: Any | None = None,
+):
+    import matplotlib.pyplot as plt
+
+    if not trajectories or reducer is None:
+        return None
+
+    points = torch.cat([trajectory for _, trajectory in trajectories], dim=0)
+    projected = _transform_with_fitted_umap(reducer, points, n_components=3)
+
+    cmap = plt.get_cmap("tab10")
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    cursor = 0
+    legend_done: set[int] = set()
+    for digit, trajectory in trajectories:
+        n_steps = trajectory.shape[0]
+        coords = projected[cursor: cursor + n_steps]
+        cursor += n_steps
+        color = cmap(digit % 10)
+        label = f"digit {digit}" if digit not in legend_done else None
+        legend_done.add(digit)
+        ax.plot(coords[:, 0], coords[:, 1], coords[:, 2], color=color, alpha=0.8, linewidth=1.8, label=label)
+        ax.scatter(coords[0, 0], coords[0, 1], coords[0, 2], color=color, marker="o", s=28)
+        ax.scatter(coords[-1, 0], coords[-1, 1], coords[-1, 2], color=color, marker="x", s=36)
+
+    ax.set_title(f"{layer_name} Activation Trajectories (3D UMAP)")
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+    ax.set_zlabel("UMAP3")
+    if legend_done:
+        ax.legend(loc="upper right", ncols=2)
+    fig.tight_layout()
+    return fig
 
 
 def _save_figure(fig, output_dir: Path | None, name: str) -> None:
@@ -535,6 +992,9 @@ def _print_summary(
     run_args: dict[str, Any],
     checkpoint_payload: dict[str, Any],
     results: dict[str, Any],
+    classification: bool,
+    trajectory_counts: dict[int, int] | None = None,
+    reference_fixed_point_counts: dict[str, int] | None = None,
 ) -> None:
     print(f"checkpoint: {checkpoint_path}")
     print(f"family: {family}")
@@ -545,13 +1005,22 @@ def _print_summary(
         print(f"saved_train_loss: {float(checkpoint_payload['train_loss']):.6f}")
     if "val_loss" in checkpoint_payload:
         print(f"saved_val_loss: {float(checkpoint_payload['val_loss']):.6f}")
-    if "val_accuracy_percent" in checkpoint_payload:
+    if classification and "val_accuracy_percent" in checkpoint_payload:
         print(f"saved_val_accuracy_percent: {float(checkpoint_payload['val_accuracy_percent']):.2f}")
     print(f"eval_loss: {results['mean_loss']:.6f}")
     print(f"eval_recon_loss: {results['mean_recon_loss']:.6f}")
-    print(f"eval_class_loss: {results['mean_class_loss']:.6f}")
-    print(f"eval_final_accuracy_percent: {results['final_accuracy_percent']:.2f}")
-    print(f"step_accuracy_percent: {[round(float(v), 2) for v in results['step_accuracy_percent']]}")
+    if classification:
+        assert results["mean_class_loss"] is not None
+        assert results["final_accuracy_percent"] is not None
+        assert results["step_accuracy_percent"] is not None
+        print(f"eval_class_loss: {results['mean_class_loss']:.6f}")
+        print(f"eval_final_accuracy_percent: {results['final_accuracy_percent']:.2f}")
+        print(f"step_accuracy_percent: {[round(float(v), 2) for v in results['step_accuracy_percent']]}")
+    if trajectory_counts:
+        print(f"trajectory_counts: {trajectory_counts}")
+        print(f"umap_available: {_umap_available()}")
+    if reference_fixed_point_counts:
+        print(f"reference_fixed_points: {reference_fixed_point_counts}")
     print("dataset_config:")
     dataset_keys = (
         "patch_size",
@@ -596,6 +1065,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--max_batches", default=None, type=int)
     parser.add_argument("--num_examples", default=None, type=int)
     parser.add_argument("--max_time_steps", default=100, type=int)
+    parser.add_argument("--classification", action="store_true")
+    parser.add_argument("--n_traj_per_digit", default=3, type=int)
     parser.add_argument("--activation_map_sample_idx", default=0, type=int)
     parser.add_argument("--hide_input_grid", action="store_true")
     parser.add_argument("--hide_activation_maps", action="store_true")
@@ -667,7 +1138,61 @@ def main(argv: list[str] | None = None) -> None:
         run_args=run_args,
         max_batches=args.max_batches,
         collect_activation_maps=not args.hide_activation_maps,
+        classification=args.classification,
+        show_progress=True,
     )
+    trajectory_payload, trajectory_counts = collect_layer_trajectories(
+        model=model,
+        dataloader=dataloader,
+        device=device,
+        n_traj_per_digit=args.n_traj_per_digit,
+        accepted_digits=args.accepted_digits,
+        max_batches=args.max_batches,
+        show_progress=True,
+    )
+    pca_reducers_2d: dict[str, dict[str, torch.Tensor]] = {}
+    pca_reducers_3d: dict[str, dict[str, torch.Tensor]] = {}
+    umap_reducers_2d: dict[str, Any] = {}
+    umap_reducers_3d: dict[str, Any] = {}
+    reference_fixed_point_counts: dict[str, int] | None = None
+    if trajectory_payload:
+        clean_dataloader_config = dict(dataloader_config)
+        clean_dataloader_config["mask_ratio"] = 0.0
+        clean_dataloader_config["noise_sigma"] = 0.0
+        clean_dataloader_config["visible_corrupt"] = False
+        clean_dataloader_config["image_visibility"] = "first"
+        clean_train_loader, _, _ = get_dataloaders(DEFAULT_DATASET, **clean_dataloader_config)
+        umap_reference_points = collect_layer_fixed_points(
+            model=model,
+            dataloader=clean_train_loader,
+            device=device,
+            show_progress=True,
+        )
+        reference_fixed_point_counts = {
+            layer_name: int(points.shape[0])
+            for layer_name, points in umap_reference_points.items()
+        }
+        pca_reducers_2d = _fit_pca_reducers(
+            umap_reference_points,
+            n_components=2,
+            show_progress=True,
+        )
+        pca_reducers_3d = _fit_pca_reducers(
+            umap_reference_points,
+            n_components=3,
+            show_progress=True,
+        )
+        if _umap_available():
+            umap_reducers_2d = _fit_umap_reducers_parallel(
+                umap_reference_points,
+                n_components=2,
+                show_progress=True,
+            )
+            umap_reducers_3d = _fit_umap_reducers_parallel(
+                umap_reference_points,
+                n_components=3,
+                show_progress=True,
+            )
     _print_summary(
         checkpoint_path=checkpoint_path,
         family=family,
@@ -675,6 +1200,9 @@ def main(argv: list[str] | None = None) -> None:
         run_args=run_args | dataloader_config,
         checkpoint_payload=checkpoint_payload,
         results=results,
+        classification=args.classification,
+        trajectory_counts=trajectory_counts,
+        reference_fixed_point_counts=reference_fixed_point_counts,
     )
 
     payload = results["visual_payload"]
@@ -703,15 +1231,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     _save_figure(recon_loss_fig, output_dir, "reconstruction_loss_over_time")
 
-    pred_fig = create_temporal_prediction_figure(
-        payload["class_logits"],
-        payload["labels"],
-        max_examples=num_examples,
-    )
-    _save_figure(pred_fig, output_dir, "prediction_confidence_over_time")
+    if args.classification:
+        pred_fig = create_temporal_prediction_figure(
+            payload["class_logits"],
+            payload["labels"],
+            max_examples=num_examples,
+        )
+        _save_figure(pred_fig, output_dir, "prediction_confidence_over_time")
 
-    acc_fig = _create_step_accuracy_figure(results["step_accuracy_percent"])
-    _save_figure(acc_fig, output_dir, "step_accuracy")
+        if results["step_accuracy_percent"] is not None:
+            acc_fig = _create_step_accuracy_figure(results["step_accuracy_percent"])
+            _save_figure(acc_fig, output_dir, "step_accuracy")
 
     if not args.hide_reconstruction_grid:
         recon_grid = create_temporal_reconstruction_grid(
@@ -744,6 +1274,36 @@ def main(argv: list[str] | None = None) -> None:
                 mode=family,
             )
             _save_figure(layer_fig, output_dir, f"activation_{layer_name.lower()}")
+
+    for layer_name, trajectories in trajectory_payload.items():
+        dynamics_fig_2d = create_layer_trajectory_pca_2d_figure(
+            layer_name,
+            trajectories,
+            reducer=pca_reducers_2d.get(layer_name),
+        )
+        if dynamics_fig_2d is not None:
+            _save_figure(dynamics_fig_2d, output_dir, f"dynamics_pca2d_{layer_name.lower()}")
+        dynamics_fig_3d = create_layer_trajectory_pca_3d_figure(
+            layer_name,
+            trajectories,
+            reducer=pca_reducers_3d.get(layer_name),
+        )
+        if dynamics_fig_3d is not None:
+            _save_figure(dynamics_fig_3d, output_dir, f"dynamics_pca3d_{layer_name.lower()}")
+        dynamics_umap_fig_2d = create_layer_trajectory_umap_2d_figure(
+            layer_name,
+            trajectories,
+            reducer=umap_reducers_2d.get(layer_name),
+        )
+        if dynamics_umap_fig_2d is not None:
+            _save_figure(dynamics_umap_fig_2d, output_dir, f"dynamics_umap2d_{layer_name.lower()}")
+        dynamics_umap_fig_3d = create_layer_trajectory_umap_3d_figure(
+            layer_name,
+            trajectories,
+            reducer=umap_reducers_3d.get(layer_name),
+        )
+        if dynamics_umap_fig_3d is not None:
+            _save_figure(dynamics_umap_fig_3d, output_dir, f"dynamics_umap3d_{layer_name.lower()}")
 
     if not args.no_show:
         plt.show()

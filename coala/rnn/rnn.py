@@ -52,15 +52,19 @@ class RNN(nn.Module):
         self,
         x: torch.Tensor,
         return_activation_maps: bool = False,
+        return_layer_trajectories: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]]]:
         recon = []
         class_logits = []
         activation_maps = None
+        layer_trajectories = None
         if return_activation_maps:
             activation_maps = {
                 signal_name: {"L0": []}
                 for signal_name in ("Y", "y_FF", "y_FB")
             }
+        if return_layer_trajectories:
+            layer_trajectories = {"L0": []}
 
         self.hidden.reset_state(batch_size=x.shape[0])
         network_state = torch.zeros(x.shape[0], self.hidden.ema.shape[1], device=x.device)
@@ -84,6 +88,8 @@ class RNN(nn.Module):
                 activation_maps["Y"]["L0"].append(y_map.mean(dim=1))
                 activation_maps["y_FF"]["L0"].append(ff_map.mean(dim=1))
                 activation_maps["y_FB"]["L0"].append(fb_map.mean(dim=1))
+            if layer_trajectories is not None:
+                layer_trajectories["L0"].append(network_state)
             if self.conv_inout:
                 recon.append(self.W_recon(network_state.view(x_t.shape[0], -1, self.hidden_resolution, self.hidden_resolution)
                                           ).view(x_t.shape))
@@ -92,19 +98,26 @@ class RNN(nn.Module):
             class_logits.append(self.W_class(self.hidden.ema.squeeze(-1).squeeze(-1)))
         recon_tensor = torch.stack(recon, dim=1)
         class_logits_tensor = torch.stack(class_logits, dim=1)
-        if activation_maps is None:
+        if activation_maps is None and layer_trajectories is None:
             return recon_tensor, class_logits_tensor
-        return {
+        result: dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]] | dict[str, torch.Tensor]] = {
             "recon": recon_tensor,
             "class_logits": class_logits_tensor,
-            "activation_maps": {
+        }
+        if activation_maps is not None:
+            result["activation_maps"] = {
                 signal_name: {
                     layer_name: torch.stack(layer_maps, dim=1)
                     for layer_name, layer_maps in per_signal_maps.items()
                 }
                 for signal_name, per_signal_maps in activation_maps.items()
-            },
-        }
+            }
+        if layer_trajectories is not None:
+            result["layer_trajectories"] = {
+                layer_name: torch.stack(layer_values, dim=1)
+                for layer_name, layer_values in layer_trajectories.items()
+            }
+        return result
 
 
 def prepare_batch(
