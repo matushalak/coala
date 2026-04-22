@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 import importlib.util
 import json
 import os
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -603,13 +604,16 @@ def collect_layer_trajectories(
 
         selected_batch = masked_inputs[selected_indices].to(device)
         model_output = model(selected_batch, return_layer_trajectories=True)
-        _, _, _, layer_trajectories = _extract_forward_outputs(model_output)
+        recon, _, _, layer_trajectories = _extract_forward_outputs(model_output)
         if layer_trajectories is None:
             raise RuntimeError("Model did not return layer trajectories.")
 
         for row_idx, digit in enumerate(selected_digits):
             for layer_name, layer_tensor in layer_trajectories.items():
                 trajectories_by_layer[layer_name].append((digit, layer_tensor[row_idx].detach().cpu()))
+            trajectories_by_layer["PIXEL"].append(
+                (digit, recon[row_idx].detach().cpu().flatten(start_dim=1))
+            )
             per_digit_counts[digit] += 1
 
         if all(count >= n_traj_per_digit for count in per_digit_counts.values()):
@@ -618,34 +622,57 @@ def collect_layer_trajectories(
     return dict(sorted(trajectories_by_layer.items())), per_digit_counts
 
 
-def collect_layer_fixed_points(
+def collect_reference_representations(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
     device: torch.device,
     show_progress: bool = False,
-) -> dict[str, torch.Tensor]:
+) -> tuple[dict[str, torch.Tensor], dict[str, dict[str, torch.Tensor]]]:
     fixed_points_by_layer: dict[str, list[torch.Tensor]] = defaultdict(list)
+    pixel_reference_points: dict[str, list[torch.Tensor]] = defaultdict(list)
+    pixel_reference_digits: dict[str, list[torch.Tensor]] = defaultdict(list)
 
     model.eval()
     iterator = dataloader
     if show_progress:
         iterator = tqdm(dataloader, desc="Collecting reference fixed points", leave=False)
     for batch in iterator:
-        masked_inputs, _ = batch
+        masked_inputs, targets = batch
         batch_inputs = masked_inputs.to(device)
         model_output = model(batch_inputs, return_layer_trajectories=True)
-        _, _, _, layer_trajectories = _extract_forward_outputs(model_output)
+        recon, _, _, layer_trajectories = _extract_forward_outputs(model_output)
         if layer_trajectories is None:
             raise RuntimeError("Model did not return layer trajectories.")
 
         for layer_name, layer_tensor in layer_trajectories.items():
             fixed_points_by_layer[layer_name].append(layer_tensor[:, -1].detach().cpu())
+        clean_image = targets["image"]
+        labels = targets["label"]
+        if clean_image.dim() == 5:
+            clean_image = clean_image[:, -1]
+        if labels.dim() == 2:
+            digits = labels[:, 0].detach().cpu()
+        else:
+            digits = labels.detach().cpu()
+        pixel_reference_points["ground_truth"].append(clean_image.detach().cpu().flatten(start_dim=1))
+        pixel_reference_points["fixed_point_recon"].append(recon[:, -1].detach().cpu().flatten(start_dim=1))
+        pixel_reference_digits["ground_truth"].append(digits)
+        pixel_reference_digits["fixed_point_recon"].append(digits)
 
-    return {
+    layer_fixed_points = {
         layer_name: torch.cat(layer_values, dim=0)
         for layer_name, layer_values in sorted(fixed_points_by_layer.items())
         if layer_values
     }
+    pixel_groups = {
+        group_name: {
+            "points": torch.cat(pixel_reference_points[group_name], dim=0),
+            "digits": torch.cat(pixel_reference_digits[group_name], dim=0),
+        }
+        for group_name in sorted(pixel_reference_points.keys())
+        if pixel_reference_points[group_name]
+    }
+    return layer_fixed_points, pixel_groups
 
 
 def _project_to_principal_components(points: torch.Tensor, n_components: int) -> torch.Tensor:
@@ -820,10 +847,133 @@ def _transform_with_fitted_umap(reducer: Any, points: torch.Tensor, n_components
     return projected
 
 
+def _build_reference_projection_signature(
+    checkpoint_path: Path,
+    family: str,
+    clean_dataloader_config: dict[str, Any],
+) -> dict[str, Any]:
+    relevant_keys = (
+        "root",
+        "patch_size",
+        "mask_ratio",
+        "mask_pattern",
+        "masked_fill",
+        "noise_sigma",
+        "visible_corrupt",
+        "number_of_masks",
+        "timesteps_per_mask",
+        "num_digits",
+        "image_visibility",
+        "accepted_digits",
+    )
+    normalized_config = {key: clean_dataloader_config.get(key) for key in relevant_keys}
+    return {
+        "cache_version": 3,
+        "family": family,
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_mtime_ns": checkpoint_path.stat().st_mtime_ns,
+        "reference_config": normalized_config,
+        "umap_available": _umap_available(),
+    }
+
+
+def _reference_cache_path(run_dir: Path) -> Path:
+    return run_dir / "reference_projection_cache.pkl"
+
+
+def _load_reference_projection_cache(run_dir: Path, signature: dict[str, Any]) -> dict[str, Any] | None:
+    cache_path = _reference_cache_path(run_dir)
+    if not cache_path.exists():
+        return None
+    with open(cache_path, "rb") as f:
+        cache_payload = pickle.load(f)
+    if cache_payload.get("signature") != signature:
+        return None
+    return cache_payload
+
+
+def _save_reference_projection_cache(run_dir: Path, cache_payload: dict[str, Any]) -> None:
+    cache_path = _reference_cache_path(run_dir)
+    with open(cache_path, "wb") as f:
+        pickle.dump(cache_payload, f)
+
+
+def _plot_pixel_reference_density(
+    ax: Any,
+    reference_groups: dict[str, dict[str, torch.Tensor]],
+) -> None:
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    cmap = plt.get_cmap("tab10")
+    group_styles = (
+        ("ground_truth", True, 0.10, 0.0),
+        ("fixed_point_recon", False, 0.45, 1.25),
+    )
+    for group_name, fill, alpha, linewidth in group_styles:
+        group = reference_groups.get(group_name)
+        if group is None:
+            continue
+        embedding = group["embedding"]
+        digits = group["digits"]
+        for digit in sorted({int(value) for value in digits.tolist()}):
+            mask = digits == digit
+            if int(mask.sum().item()) < 2:
+                continue
+            kde_kwargs = {
+                "x": embedding[mask, 0].numpy(),
+                "y": embedding[mask, 1].numpy(),
+                "ax": ax,
+                "color": cmap(digit % 10),
+                "fill": fill,
+                "alpha": alpha,
+                "levels": 5,
+                "thresh": 0.05,
+                "legend": False,
+                "warn_singular": False,
+            }
+            if not fill:
+                kde_kwargs["linewidths"] = linewidth
+            sns.kdeplot(
+                **kde_kwargs,
+            )
+
+
+def _plot_pixel_reference_scatter_3d(
+    ax: Any,
+    reference_groups: dict[str, dict[str, torch.Tensor]],
+) -> None:
+    import matplotlib.pyplot as plt
+
+    cmap = plt.get_cmap("tab10")
+    group_styles = (
+        ("ground_truth", "o", 0.06, 4),
+        ("fixed_point_recon", "^", 0.10, 5),
+    )
+    for group_name, marker, alpha, size in group_styles:
+        group = reference_groups.get(group_name)
+        if group is None:
+            continue
+        embedding = group["embedding"]
+        digits = group["digits"]
+        for digit in sorted({int(value) for value in digits.tolist()}):
+            mask = digits == digit
+            ax.scatter(
+                embedding[mask, 0],
+                embedding[mask, 1],
+                embedding[mask, 2],
+                color=cmap(digit % 10),
+                marker=marker,
+                alpha=alpha,
+                s=size,
+            )
+
+
 def create_layer_trajectory_pca_2d_figure(
     layer_name: str,
     trajectories: list[tuple[int, torch.Tensor]],
     reducer: dict[str, torch.Tensor] | None = None,
+    reference_groups: dict[str, torch.Tensor] | None = None,
 ):
     import matplotlib.pyplot as plt
 
@@ -835,6 +985,17 @@ def create_layer_trajectory_pca_2d_figure(
 
     cmap = plt.get_cmap("tab10")
     fig, ax = plt.subplots(figsize=(7, 6))
+
+    if reference_groups:
+        if layer_name == "PIXEL":
+            _plot_pixel_reference_density(ax, reference_groups)
+        else:
+            gt = reference_groups.get("ground_truth")
+            clean_recon = reference_groups.get("fixed_point_recon")
+            if gt is not None:
+                ax.scatter(gt[:, 0], gt[:, 1], color="lightgray", s=6, alpha=0.35, label="ground truth")
+            if clean_recon is not None:
+                ax.scatter(clean_recon[:, 0], clean_recon[:, 1], color="black", s=6, alpha=0.2, label="clean fixed-point recon")
 
     cursor = 0
     legend_done: set[int] = set()
@@ -863,6 +1024,7 @@ def create_layer_trajectory_umap_2d_figure(
     layer_name: str,
     trajectories: list[tuple[int, torch.Tensor]],
     reducer: Any | None = None,
+    reference_groups: dict[str, torch.Tensor] | None = None,
 ):
     import matplotlib.pyplot as plt
 
@@ -874,6 +1036,17 @@ def create_layer_trajectory_umap_2d_figure(
 
     cmap = plt.get_cmap("tab10")
     fig, ax = plt.subplots(figsize=(7, 6))
+
+    if reference_groups:
+        if layer_name == "PIXEL":
+            _plot_pixel_reference_density(ax, reference_groups)
+        else:
+            gt = reference_groups.get("ground_truth")
+            clean_recon = reference_groups.get("fixed_point_recon")
+            if gt is not None:
+                ax.scatter(gt[:, 0], gt[:, 1], color="lightgray", s=6, alpha=0.35, label="ground truth")
+            if clean_recon is not None:
+                ax.scatter(clean_recon[:, 0], clean_recon[:, 1], color="black", s=6, alpha=0.2, label="clean fixed-point recon")
 
     cursor = 0
     legend_done: set[int] = set()
@@ -902,6 +1075,7 @@ def create_layer_trajectory_pca_3d_figure(
     layer_name: str,
     trajectories: list[tuple[int, torch.Tensor]],
     reducer: dict[str, torch.Tensor] | None = None,
+    reference_groups: dict[str, torch.Tensor] | None = None,
 ):
     import matplotlib.pyplot as plt
 
@@ -914,6 +1088,17 @@ def create_layer_trajectory_pca_3d_figure(
     cmap = plt.get_cmap("tab10")
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
+
+    if reference_groups:
+        if layer_name == "PIXEL":
+            _plot_pixel_reference_scatter_3d(ax, reference_groups)
+        else:
+            gt = reference_groups.get("ground_truth")
+            clean_recon = reference_groups.get("fixed_point_recon")
+            if gt is not None:
+                ax.scatter(gt[:, 0], gt[:, 1], gt[:, 2], color="lightgray", s=5, alpha=0.25, label="ground truth")
+            if clean_recon is not None:
+                ax.scatter(clean_recon[:, 0], clean_recon[:, 1], clean_recon[:, 2], color="black", s=5, alpha=0.15, label="clean fixed-point recon")
 
     cursor = 0
     legend_done: set[int] = set()
@@ -942,6 +1127,7 @@ def create_layer_trajectory_umap_3d_figure(
     layer_name: str,
     trajectories: list[tuple[int, torch.Tensor]],
     reducer: Any | None = None,
+    reference_groups: dict[str, torch.Tensor] | None = None,
 ):
     import matplotlib.pyplot as plt
 
@@ -954,6 +1140,17 @@ def create_layer_trajectory_umap_3d_figure(
     cmap = plt.get_cmap("tab10")
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
+
+    if reference_groups:
+        if layer_name == "PIXEL":
+            _plot_pixel_reference_scatter_3d(ax, reference_groups)
+        else:
+            gt = reference_groups.get("ground_truth")
+            clean_recon = reference_groups.get("fixed_point_recon")
+            if gt is not None:
+                ax.scatter(gt[:, 0], gt[:, 1], gt[:, 2], color="lightgray", s=5, alpha=0.25, label="ground truth")
+            if clean_recon is not None:
+                ax.scatter(clean_recon[:, 0], clean_recon[:, 1], clean_recon[:, 2], color="black", s=5, alpha=0.15, label="clean fixed-point recon")
 
     cursor = 0
     legend_done: set[int] = set()
@@ -1155,44 +1352,117 @@ def main(argv: list[str] | None = None) -> None:
     umap_reducers_2d: dict[str, Any] = {}
     umap_reducers_3d: dict[str, Any] = {}
     reference_fixed_point_counts: dict[str, int] | None = None
+    pixel_reference_pca_embeddings_2d: dict[str, torch.Tensor] = {}
+    pixel_reference_pca_embeddings_3d: dict[str, torch.Tensor] = {}
+    pixel_reference_umap_embeddings_2d: dict[str, torch.Tensor] = {}
+    pixel_reference_umap_embeddings_3d: dict[str, torch.Tensor] = {}
     if trajectory_payload:
         clean_dataloader_config = dict(dataloader_config)
         clean_dataloader_config["mask_ratio"] = 0.0
         clean_dataloader_config["noise_sigma"] = 0.0
         clean_dataloader_config["visible_corrupt"] = False
         clean_dataloader_config["image_visibility"] = "first"
-        clean_train_loader, _, _ = get_dataloaders(DEFAULT_DATASET, **clean_dataloader_config)
-        umap_reference_points = collect_layer_fixed_points(
-            model=model,
-            dataloader=clean_train_loader,
-            device=device,
-            show_progress=True,
+        cache_signature = _build_reference_projection_signature(
+            checkpoint_path=checkpoint_path,
+            family=family,
+            clean_dataloader_config=clean_dataloader_config,
         )
-        reference_fixed_point_counts = {
-            layer_name: int(points.shape[0])
-            for layer_name, points in umap_reference_points.items()
-        }
-        pca_reducers_2d = _fit_pca_reducers(
-            umap_reference_points,
-            n_components=2,
-            show_progress=True,
-        )
-        pca_reducers_3d = _fit_pca_reducers(
-            umap_reference_points,
-            n_components=3,
-            show_progress=True,
-        )
-        if _umap_available():
-            umap_reducers_2d = _fit_umap_reducers_parallel(
-                umap_reference_points,
+        run_dir = checkpoint_path.parent
+        cached_reference = _load_reference_projection_cache(run_dir, cache_signature)
+        if cached_reference is not None:
+            print(f"Loaded cached reference projections from {_reference_cache_path(run_dir)}")
+            pca_reducers_2d = cached_reference["pca_reducers_2d"]
+            pca_reducers_3d = cached_reference["pca_reducers_3d"]
+            umap_reducers_2d = cached_reference.get("umap_reducers_2d", {})
+            umap_reducers_3d = cached_reference.get("umap_reducers_3d", {})
+            reference_fixed_point_counts = cached_reference.get("reference_fixed_point_counts")
+            pixel_reference_pca_embeddings_2d = cached_reference.get("pixel_reference_pca_embeddings_2d", {})
+            pixel_reference_pca_embeddings_3d = cached_reference.get("pixel_reference_pca_embeddings_3d", {})
+            pixel_reference_umap_embeddings_2d = cached_reference.get("pixel_reference_umap_embeddings_2d", {})
+            pixel_reference_umap_embeddings_3d = cached_reference.get("pixel_reference_umap_embeddings_3d", {})
+        else:
+            clean_train_loader, _, _ = get_dataloaders(DEFAULT_DATASET, **clean_dataloader_config)
+            layer_reference_points, pixel_reference_groups = collect_reference_representations(
+                model=model,
+                dataloader=clean_train_loader,
+                device=device,
+                show_progress=True,
+            )
+            combined_reference_points = dict(layer_reference_points)
+            combined_reference_points["PIXEL"] = torch.cat(
+                (
+                    pixel_reference_groups["ground_truth"]["points"],
+                    pixel_reference_groups["fixed_point_recon"]["points"],
+                ),
+                dim=0,
+            )
+            reference_fixed_point_counts = {
+                layer_name: int(points.shape[0])
+                for layer_name, points in combined_reference_points.items()
+            }
+            pca_reducers_2d = _fit_pca_reducers(
+                combined_reference_points,
                 n_components=2,
                 show_progress=True,
             )
-            umap_reducers_3d = _fit_umap_reducers_parallel(
-                umap_reference_points,
+            pca_reducers_3d = _fit_pca_reducers(
+                combined_reference_points,
                 n_components=3,
                 show_progress=True,
             )
+            pixel_reference_pca_embeddings_2d = {
+                group_name: {
+                    "embedding": _transform_with_fitted_pca(pca_reducers_2d["PIXEL"], group_data["points"], 2),
+                    "digits": group_data["digits"],
+                }
+                for group_name, group_data in pixel_reference_groups.items()
+            }
+            pixel_reference_pca_embeddings_3d = {
+                group_name: {
+                    "embedding": _transform_with_fitted_pca(pca_reducers_3d["PIXEL"], group_data["points"], 3),
+                    "digits": group_data["digits"],
+                }
+                for group_name, group_data in pixel_reference_groups.items()
+            }
+            if _umap_available():
+                umap_reducers_2d = _fit_umap_reducers_parallel(
+                    combined_reference_points,
+                    n_components=2,
+                    show_progress=True,
+                )
+                umap_reducers_3d = _fit_umap_reducers_parallel(
+                    combined_reference_points,
+                    n_components=3,
+                    show_progress=True,
+                )
+                pixel_reference_umap_embeddings_2d = {
+                    group_name: {
+                        "embedding": _transform_with_fitted_umap(umap_reducers_2d["PIXEL"], group_data["points"], 2),
+                        "digits": group_data["digits"],
+                    }
+                    for group_name, group_data in pixel_reference_groups.items()
+                }
+                pixel_reference_umap_embeddings_3d = {
+                    group_name: {
+                        "embedding": _transform_with_fitted_umap(umap_reducers_3d["PIXEL"], group_data["points"], 3),
+                        "digits": group_data["digits"],
+                    }
+                    for group_name, group_data in pixel_reference_groups.items()
+                }
+            cache_payload = {
+                "signature": cache_signature,
+                "pca_reducers_2d": pca_reducers_2d,
+                "pca_reducers_3d": pca_reducers_3d,
+                "umap_reducers_2d": umap_reducers_2d,
+                "umap_reducers_3d": umap_reducers_3d,
+                "reference_fixed_point_counts": reference_fixed_point_counts,
+                "pixel_reference_pca_embeddings_2d": pixel_reference_pca_embeddings_2d,
+                "pixel_reference_pca_embeddings_3d": pixel_reference_pca_embeddings_3d,
+                "pixel_reference_umap_embeddings_2d": pixel_reference_umap_embeddings_2d,
+                "pixel_reference_umap_embeddings_3d": pixel_reference_umap_embeddings_3d,
+            }
+            _save_reference_projection_cache(run_dir, cache_payload)
+            print(f"Saved reference projections to {_reference_cache_path(run_dir)}")
     _print_summary(
         checkpoint_path=checkpoint_path,
         family=family,
@@ -1276,17 +1546,27 @@ def main(argv: list[str] | None = None) -> None:
             _save_figure(layer_fig, output_dir, f"activation_{layer_name.lower()}")
 
     for layer_name, trajectories in trajectory_payload.items():
+        pca_reference_groups = None
+        umap_reference_groups = None
+        if layer_name == "PIXEL":
+            pca_reference_groups = pixel_reference_pca_embeddings_2d
+            umap_reference_groups = pixel_reference_umap_embeddings_2d
         dynamics_fig_2d = create_layer_trajectory_pca_2d_figure(
             layer_name,
             trajectories,
             reducer=pca_reducers_2d.get(layer_name),
+            reference_groups=pca_reference_groups,
         )
         if dynamics_fig_2d is not None:
             _save_figure(dynamics_fig_2d, output_dir, f"dynamics_pca2d_{layer_name.lower()}")
+        pca_reference_groups = None
+        if layer_name == "PIXEL":
+            pca_reference_groups = pixel_reference_pca_embeddings_3d
         dynamics_fig_3d = create_layer_trajectory_pca_3d_figure(
             layer_name,
             trajectories,
             reducer=pca_reducers_3d.get(layer_name),
+            reference_groups=pca_reference_groups,
         )
         if dynamics_fig_3d is not None:
             _save_figure(dynamics_fig_3d, output_dir, f"dynamics_pca3d_{layer_name.lower()}")
@@ -1294,13 +1574,18 @@ def main(argv: list[str] | None = None) -> None:
             layer_name,
             trajectories,
             reducer=umap_reducers_2d.get(layer_name),
+            reference_groups=umap_reference_groups,
         )
         if dynamics_umap_fig_2d is not None:
             _save_figure(dynamics_umap_fig_2d, output_dir, f"dynamics_umap2d_{layer_name.lower()}")
+        umap_reference_groups = None
+        if layer_name == "PIXEL":
+            umap_reference_groups = pixel_reference_umap_embeddings_3d
         dynamics_umap_fig_3d = create_layer_trajectory_umap_3d_figure(
             layer_name,
             trajectories,
             reducer=umap_reducers_3d.get(layer_name),
+            reference_groups=umap_reference_groups,
         )
         if dynamics_umap_fig_3d is not None:
             _save_figure(dynamics_umap_fig_3d, output_dir, f"dynamics_umap3d_{layer_name.lower()}")
