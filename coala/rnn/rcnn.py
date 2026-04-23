@@ -49,11 +49,14 @@ class rCNN(nn.Module):
         x: torch.Tensor,
         return_activation_maps: bool = False,
         return_layer_trajectories: bool = False,
+        return_final_latent: bool = False,
+        return_class_logits: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor] | dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]]]:
         recon = []
-        class_logits = []
+        class_logits = [] if return_class_logits else None
         activation_maps = None
         layer_trajectories = None
+        final_latent = None
         if return_activation_maps:
             activation_maps = {
                 signal_name: {f"L{i}": [] for i in range(1,4)}
@@ -101,17 +104,21 @@ class rCNN(nn.Module):
                 layer_trajectories["L1"].append(self.V1.ema.flatten(start_dim=1))
                 layer_trajectories["L2"].append(self.V2.ema.flatten(start_dim=1))
                 layer_trajectories["L3"].append(self.V4.ema.flatten(start_dim=1))
+            if return_final_latent:
+                final_latent = self.V4.ema.flatten(start_dim=1)
             
             recon.append(self.W_recon(self.V1.ema))
-            class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
+            if class_logits is not None:
+                class_logits.append(self.W_class(self.V4.ema.squeeze(-1).squeeze(-1)))
         recon_tensor = torch.stack(recon, dim=1)
-        class_logits_tensor = torch.stack(class_logits, dim=1)
-        if activation_maps is None and layer_trajectories is None:
+        class_logits_tensor = torch.stack(class_logits, dim=1) if class_logits is not None else None
+        if activation_maps is None and layer_trajectories is None and not return_final_latent and class_logits_tensor is not None:
             return recon_tensor, class_logits_tensor
         result: dict[str, torch.Tensor | dict[str, dict[str, torch.Tensor]] | dict[str, torch.Tensor]] = {
             "recon": recon_tensor,
-            "class_logits": class_logits_tensor,
         }
+        if class_logits_tensor is not None:
+            result["class_logits"] = class_logits_tensor
         if activation_maps is not None:
             result["activation_maps"] = {
                 signal_name: {
@@ -125,6 +132,8 @@ class rCNN(nn.Module):
                 layer_name: torch.stack(layer_values, dim=1)
                 for layer_name, layer_values in layer_trajectories.items()
             }
+        if final_latent is not None:
+            result["final_latent"] = final_latent
         return result
 
 
@@ -132,11 +141,14 @@ def prepare_batch(
     batch: tuple[torch.Tensor, dict[str, torch.Tensor]],
     device: torch.device,
     rollout_length: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     x, targets = batch
     x = x.to(device)
     clean_image = targets["image"].to(device)
     labels = targets["label"].to(device)
+    contrastive_positive_index = None
+    if isinstance(targets, dict) and "contrastive_positive_index" in targets:
+        contrastive_positive_index = targets["contrastive_positive_index"].to(device)
 
     if rollout_length is not None:
         x = x[:, :rollout_length]
@@ -145,8 +157,7 @@ def prepare_batch(
         if labels.dim() == 2:
             labels = labels[:, :rollout_length]
 
-    # TODO: Do contrastive 2nd augmentation on clean image to double batch size
-    return x, clean_image, labels
+    return x, clean_image, labels, contrastive_positive_index
 
 
 def expand_clean_targets(clean_image: torch.Tensor, n_steps: int) -> torch.Tensor:
@@ -171,35 +182,61 @@ def expand_label_targets(labels: torch.Tensor, n_steps: int) -> torch.Tensor:
     return labels.unsqueeze(1).expand(-1, n_steps)
 
 
+def nt_xent_loss(
+    latents: torch.Tensor,
+    positive_index: torch.Tensor,
+    temperature: float = 0.1,
+) -> torch.Tensor:
+    if latents.ndim != 3:
+        raise ValueError(f"Expected latents with shape (batch, time, dim), got {tuple(latents.shape)}.")
+    batch_size, _, _ = latents.shape
+    if positive_index.shape != (batch_size,):
+        raise ValueError(
+            "positive_index must have shape (batch,), "
+            f"got {tuple(positive_index.shape)} for batch size {batch_size}."
+        )
+    if batch_size < 2:
+        raise ValueError("NT-Xent requires at least two paired samples in the batch.")
+
+    normalized = F.normalize(latents, dim=-1)
+    similarities = torch.matmul(normalized.transpose(0, 1), normalized.transpose(0, 1).transpose(1, 2))
+    similarities = similarities / temperature
+    eye = torch.eye(batch_size, dtype=torch.bool, device=latents.device).unsqueeze(0)
+    similarities = similarities.masked_fill(eye, float("-inf"))
+    targets = positive_index.unsqueeze(0).expand(latents.shape[1], -1)
+    return F.cross_entropy(
+        similarities.reshape(-1, batch_size),
+        targets.reshape(-1),
+        reduction="none",
+    ).view(latents.shape[1], batch_size).mean(dim=1)
+
+
 def compute_losses(
     recon: torch.Tensor,
-    class_logits: torch.Tensor,
-    latents: torch.Tensor,
+    class_logits: torch.Tensor | None,
     clean_image: torch.Tensor,
     labels: torch.Tensor,
     t0_weight: float = 0.5,
+    latents: torch.Tensor | None = None,
+    contrastive_positive_index: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     weights = torch.linspace(t0_weight, 1.0, steps=recon.shape[1], device=recon.device)
     target_recon = expand_clean_targets(clean_image, recon.shape[1])
-    target_labels = expand_label_targets(labels, class_logits.shape[1])
     recon_loss = F.smooth_l1_loss(recon, target_recon, reduction = 'none', beta = 0.0) # l1 if beta = 0 / huber if beta > 0
-    # class_loss = F.cross_entropy(class_logits.view(-1, class_logits.shape[-1]),target_labels.reshape(-1),
-    #                              reduction='none').view(class_logits.shape[0], class_logits.shape[1])
-    breakpoint()
-    # TODO
-    # Replace class loss with invariance loss on the last layer trajectories
-    # We can weight the loss with the same weight as the MSE loss
-    # Semi-supervised
-        # We want the latents of same class to be similar across time steps, 
-        # so we can use MSE loss between all pairs of time steps. 
-    # Self-supervised
-        # Use different corruptions of the same image as positive pairs,
-        # and different corruptions of different images as negative pairs
-    # -> NT-Xent loss / InfoNCE loss
-
     recon_loss = (recon_loss.mean(dim=[2, 3, 4]) * weights).mean()
-    class_loss = (class_loss * weights).mean()
-    return recon_loss, class_loss, recon_loss #+ class_loss
+    
+    if latents is None or contrastive_positive_index is None:
+        if class_logits is None:
+            raise ValueError("class_logits are required when contrastive loss is not being used.")
+        target_labels = expand_label_targets(labels, class_logits.shape[1])
+        class_loss = F.cross_entropy(class_logits.view(-1, class_logits.shape[-1]),target_labels.reshape(-1),
+                                    reduction='none').view(class_logits.shape[0], class_logits.shape[1])
+        class_loss = (class_loss * weights).mean()
+    else:
+        class_loss = nt_xent_loss(latents, contrastive_positive_index)
+        class_loss = (class_loss * weights).mean()
+
+    return recon_loss, class_loss, recon_loss + (0.05*class_loss)
 
 
 def make_reconstruction_grid(
@@ -298,12 +335,24 @@ def evaluate(
         if max_batches is not None and batch_idx >= max_batches:
             break
 
-        masked_inputs, clean_image, labels = prepare_batch(batch, device)
-        # recon, class_logits = model(masked_inputs)
-        model_outputs = model(masked_inputs, return_layer_trajectories=True)
-        recon, class_logits, latents = model_outputs["recon"], model_outputs["class_logits"], model_outputs["layer_trajectories"]['L3']
-        # recon_loss, class_loss, loss = compute_losses(recon, class_logits, clean_image, labels, t0_weight=t0_weight)
-        recon_loss, class_loss, loss = compute_losses(recon, class_logits, latents, clean_image, labels, t0_weight=t0_weight)
+        masked_inputs, clean_image, labels, contrastive_positive_index = prepare_batch(batch, device)
+        model_outputs = model(
+            masked_inputs,
+            return_layer_trajectories=contrastive_positive_index is not None,
+            return_final_latent=False,
+        )
+        recon = model_outputs["recon"] if isinstance(model_outputs, dict) else model_outputs[0]
+        class_logits = model_outputs["class_logits"] if isinstance(model_outputs, dict) else model_outputs[1]
+        latents = None if contrastive_positive_index is None else model_outputs["layer_trajectories"]["L3"]
+        recon_loss, class_loss, loss = compute_losses(
+            recon,
+            class_logits,
+            clean_image,
+            labels,
+            t0_weight=t0_weight,
+            latents=latents,
+            contrastive_positive_index=contrastive_positive_index,
+        )
 
         batch_size = masked_inputs.shape[0]
         total_loss += loss.item() * batch_size
@@ -370,12 +419,29 @@ def train(
                 break
 
             rollout_length = torch.randint(low=8, high=20, size=(1,), device=device).item()
-            masked_inputs, clean_image, labels = prepare_batch(batch, device, rollout_length=rollout_length)
-            # recon, class_logits = model(masked_inputs)
-            model_outputs = model(masked_inputs, return_layer_trajectories=True)
-            recon, class_logits, latents = model_outputs["recon"], model_outputs["class_logits"], model_outputs["layer_trajectories"]['L3']
-            # recon_loss, class_loss, loss = compute_losses(recon, class_logits, clean_image, labels, t0_weight=args.t0_weight if args is not None else 0.5)
-            recon_loss, class_loss, loss = compute_losses(recon, class_logits, latents, clean_image, labels, t0_weight=args.t0_weight if args is not None else 0.5)
+            masked_inputs, clean_image, labels, contrastive_positive_index = prepare_batch(
+                batch,
+                device,
+                rollout_length=rollout_length,
+            )
+            model_outputs = model(
+                masked_inputs,
+                return_layer_trajectories=contrastive_positive_index is not None,
+                return_final_latent=False,
+                return_class_logits=contrastive_positive_index is None,
+            )
+            recon = model_outputs["recon"] if isinstance(model_outputs, dict) else model_outputs[0]
+            class_logits = None if contrastive_positive_index is not None else (model_outputs["class_logits"] if isinstance(model_outputs, dict) else model_outputs[1])
+            latents = None if contrastive_positive_index is None else model_outputs["layer_trajectories"]["L3"]
+            recon_loss, class_loss, loss = compute_losses(
+                recon,
+                class_logits,
+                clean_image,
+                labels,
+                t0_weight=args.t0_weight if args is not None else 0.5,
+                latents=latents,
+                contrastive_positive_index=contrastive_positive_index,
+            )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
