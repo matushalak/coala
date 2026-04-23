@@ -15,16 +15,17 @@ import torch
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
-from coala import DATADIR, RNN_logs, hcRNN_logs, lrRNN_logs
+from coala import DATADIR, RNN_logs, hcRNN_logs, lrRNN_logs, rCNN_logs
 from coala.datasets import get_dataloaders
 from coala.rnn.hcrnn import hConvRNN, compute_losses as compute_hcrnn_losses
 from coala.rnn.lr_rnn import lrRNN, compute_losses as compute_lrrnn_losses
+from coala.rnn.rcnn import rCNN
 from coala.rnn.rnn import RNN, compute_losses as compute_rnn_losses
 from coala.visualize_activation_maps import create_activation_input_figure, create_activation_map_figure
 
 __test__ = False
 
-FAMILY_CHOICES = ("hcrnn", "rnn", "lrrnn")
+FAMILY_CHOICES = ("hcrnn", "rnn", "lrrnn", "rcnn")
 DEFAULT_DATASET = "msmnist"
 DEFAULT_CHECKPOINT_NAME = "best_val_loss.pt"
 
@@ -49,6 +50,7 @@ def _normalize_family_name(value: str | None) -> str | None:
         "rnn": "rnn",
         "lrrnn": "lrrnn",
         "lowrankrnn": "lrrnn",
+        "rcnn": "rcnn",
     }
     if normalized not in alias_map:
         raise ValueError(f"Unknown RNN family {value!r}. Expected one of {FAMILY_CHOICES}.")
@@ -94,6 +96,8 @@ def _infer_family_from_checkpoint_path(checkpoint_path: Path) -> str:
         return "lrrnn"
     if "rnn" in parts:
         return "rnn"
+    if "rcnn" in parts:
+        return "rcnn"
     raise ValueError(
         "Could not infer checkpoint family from path. Pass --family explicitly. "
         f"checkpoint_path={checkpoint_path}"
@@ -141,6 +145,8 @@ def _build_model(family: str, run_args: dict[str, Any]) -> torch.nn.Module:
         return RNN(conv_inout=_coerce_bool(run_args.get("conv_inout", False)))
     if family == "lrrnn":
         return lrRNN(rank=int(run_args.get("rank", 4)))
+    if family == "rcnn":
+        return rCNN()
     raise ValueError(f"Unsupported family {family!r}")
 
 
@@ -417,7 +423,7 @@ def _compute_losses(
     labels: torch.Tensor,
     run_args: dict[str, Any],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if family == "hcrnn":
+    if family == "hcrnn" or family == "rcnn":
         return compute_hcrnn_losses(
             recon,
             class_logits,
@@ -1985,6 +1991,7 @@ def main(argv: list[str] | None = None) -> None:
             _maybe_close_figure(layer_fig, keep_open=False)
 
     for layer_name, trajectories in trajectory_payload.items():
+        # PCA figures
         dynamics_fig_2d = create_layer_trajectory_pca_2d_figure(
             layer_name,
             trajectories,
@@ -2002,7 +2009,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         if dynamics_fig_3d is not None:
             _save_figure(dynamics_fig_3d, output_dir, f"dynamics_pca3d_{layer_name.lower()}")
-            _maybe_close_figure(dynamics_fig_3d, keep_open=not args.no_show)
+            _maybe_close_figure(dynamics_fig_3d, keep_open=False)
+        
+        # UMAP figures
         dynamics_umap_fig_2d = create_layer_trajectory_umap_2d_figure(
             layer_name,
             trajectories,

@@ -141,7 +141,7 @@ def msmnist(
     test_loader = data.DataLoader(
         test_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=0,
         drop_last=False,
     )
