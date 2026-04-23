@@ -442,6 +442,7 @@ def main():
         timesteps_per_mask=args.timesteps_per_mask,
         num_digits=args.num_digits,
         image_visibility=args.image_visibility,
+        contrastive=args.contrastive,
         target_type="both",
     )
     model = RNN(conv_inout=args.conv_inout)
@@ -474,6 +475,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--num_digits", type=int, default=1)
     parser.add_argument("--image_visibility", type=str, default="all")
     parser.add_argument("--visible_corrupt", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--contrastive", action=argparse.BooleanOptionalAction)
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--max_val_batches", type=int, default=None)
     parser.add_argument("--data_dir", type=str, default=str(DATADIR))

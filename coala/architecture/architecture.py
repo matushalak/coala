@@ -14,7 +14,7 @@ from coala import DATADIR, MAE_logs, Classifier_logs, FM_logs, Head_logs, LeJEPA
 from coala.utils import load_checkpoint
 from coala.architecture.cc_modules import CCModule
 from coala.datasets import get_dataloaders
-from coala.datasets.masked_sequential import MaskedSequentialDataset
+from coala.datasets.masked_sequential import MaskedSequentialDataset, masked_sequential_collate
 from coala.datasets.registry import resolve_dataset_name
 from coala.pretraining.common import (
     GenerativeHead,
@@ -550,6 +550,7 @@ def visualize_masked_sequence_examples(
     image_visibility: str = "all",
     accepted_digits: list[int] | None = None,
     target_type: str = "label",
+    contrastive: bool = False,
     show: bool = True,
     shuffle_examples: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -581,12 +582,14 @@ def visualize_masked_sequence_examples(
         num_digits=num_digits,
         image_visibility=image_visibility,
         target_type=target_type,
+        contrastive=contrastive,
     )
     loader = DataLoader(
         sequence_dataset,
         batch_size=max(1, num_examples),
         shuffle=shuffle_examples,
         num_workers=0,
+        collate_fn=masked_sequential_collate,
     )
     masked_imgs, targets = next(iter(loader))
     if show:
@@ -1006,6 +1009,8 @@ def build_argparser() -> argparse.ArgumentParser:
                         help="Size of each patch.")
     parser.add_argument("--visible_corrupt", action='store_true', 
                         help="Whether to corrupt visible pixels.")
+    parser.add_argument("--contrastive", action="store_true",
+                        help="Emit paired structured-mask views for contrastive training or inspection.")
     parser.add_argument("--num_digits", default=1, type=int,
                         help="How many distinct digits to concatenate in time for each sample.")
     parser.add_argument("--image_visibility", default="all", type=str,
@@ -1055,6 +1060,7 @@ def main(argv: list[str] | None = None) -> None:
         masked_fill=_parse_masked_fill_arg(args.masked_fill),
         noise_sigma=args.noise_sigma,
         visible_corrupt=args.visible_corrupt,
+        contrastive=args.contrastive,
         num_digits=args.num_digits,
         image_visibility=args.image_visibility,
         accepted_digits=args.accepted_digits,

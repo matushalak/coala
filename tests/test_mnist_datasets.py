@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 # Allow direct script execution from inside this folder: `python test_mnist_datasets.py`.
@@ -152,6 +153,81 @@ def test_msmnist_num_digits_and_image_visibility(monkeypatch):
     assert torch.all(masked_imgs[:, 9:12] == -1.0)
 
 
+def test_msmnist_contrastive_requires_structured_mask(monkeypatch):
+    import torchvision
+
+    from coala.datasets.msmnist import msmnist
+
+    monkeypatch.setattr(torchvision.datasets, "MNIST", _DummyMNIST)
+    with pytest.raises(ValueError, match="structured"):
+        msmnist(
+            batch_size=2,
+            num_workers=0,
+            download=False,
+            patch_size=4,
+            mask_ratio=0.5,
+            mask_pattern="random",
+            masked_fill=0.0,
+            noise_sigma=0.0,
+            number_of_masks=2,
+            timesteps_per_mask=1,
+            target_type="both",
+            contrastive=True,
+        )
+
+
+def test_msmnist_contrastive_interleaves_positive_pairs(monkeypatch):
+    import torchvision
+
+    from coala.datasets.msmnist import msmnist
+
+    monkeypatch.setattr(torchvision.datasets, "MNIST", _DummyMNIST)
+    masked_fill = 2.0
+
+    def _load_batch(mask_ratio: float):
+        torch.manual_seed(0)
+        train_loader, _, _ = msmnist(
+            batch_size=2,
+            num_workers=0,
+            download=False,
+            patch_size=4,
+            mask_ratio=mask_ratio,
+            mask_pattern="structured",
+            masked_fill=masked_fill,
+            noise_sigma=0.0,
+            number_of_masks=2,
+            timesteps_per_mask=1,
+            target_type="both",
+            contrastive=True,
+        )
+        return next(iter(train_loader))
+
+    masked_imgs_mid, targets_mid = _load_batch(mask_ratio=0.5)
+    masked_imgs_high, _ = _load_batch(mask_ratio=0.8)
+    masked_imgs_zero, targets_zero = _load_batch(mask_ratio=0.0)
+
+    assert masked_imgs_mid.shape == (4, 2, 1, 28, 28)
+    assert targets_mid["image"].shape == (4, 2, 1, 28, 28)
+    assert targets_mid["label"].shape == (4, 2)
+    assert targets_mid["contrastive_group"].tolist() == [0, 0, 1, 1]
+    assert targets_mid["contrastive_view"].tolist() == [0, 1, 0, 1]
+    assert targets_mid["contrastive_positive_index"].tolist() == [1, 0, 3, 2]
+    assert torch.equal(targets_mid["image"][0], targets_mid["image"][1])
+    assert torch.equal(targets_mid["image"][2], targets_mid["image"][3])
+    assert torch.equal(targets_mid["label"][0], targets_mid["label"][1])
+    assert torch.equal(targets_mid["label"][2], targets_mid["label"][3])
+
+    mid_view0_masked = (masked_imgs_mid[0] == masked_fill).sum().item()
+    mid_view1_masked = (masked_imgs_mid[1] == masked_fill).sum().item()
+    high_view0_masked = (masked_imgs_high[0] == masked_fill).sum().item()
+    high_view1_masked = (masked_imgs_high[1] == masked_fill).sum().item()
+
+    assert mid_view1_masked > mid_view0_masked
+    assert high_view0_masked > mid_view0_masked
+    assert high_view1_masked == mid_view1_masked
+    assert torch.equal(masked_imgs_zero[1], targets_zero["image"][1])
+
+
 if __name__ == "__main__":
     import torchvision
     from unittest.mock import patch
@@ -200,5 +276,51 @@ if __name__ == "__main__":
         assert torch.all(masked_imgs[:, 1:4] == -1.0)
         assert torch.all(masked_imgs[:, 5:8] == -1.0)
         assert torch.all(masked_imgs[:, 9:12] == -1.0)
+
+        with pytest.raises(ValueError, match="structured"):
+            msmnist(
+                batch_size=2,
+                num_workers=0,
+                download=False,
+                patch_size=4,
+                mask_ratio=0.5,
+                mask_pattern="random",
+                masked_fill=0.0,
+                noise_sigma=0.0,
+                number_of_masks=2,
+                timesteps_per_mask=1,
+                target_type="both",
+                contrastive=True,
+            )
+
+        masked_fill = 2.0
+
+        def _load_batch(mask_ratio: float):
+            torch.manual_seed(0)
+            train_loader, _, _ = msmnist(
+                batch_size=2,
+                num_workers=0,
+                download=False,
+                patch_size=4,
+                mask_ratio=mask_ratio,
+                mask_pattern="structured",
+                masked_fill=masked_fill,
+                noise_sigma=0.0,
+                number_of_masks=2,
+                timesteps_per_mask=1,
+                target_type="both",
+                contrastive=True,
+            )
+            return next(iter(train_loader))
+
+        masked_imgs_mid, targets_mid = _load_batch(mask_ratio=0.5)
+        masked_imgs_high, _ = _load_batch(mask_ratio=0.8)
+        masked_imgs_zero, targets_zero = _load_batch(mask_ratio=0.0)
+        assert masked_imgs_mid.shape == (4, 2, 1, 28, 28)
+        assert targets_mid["contrastive_positive_index"].tolist() == [1, 0, 3, 2]
+        assert (masked_imgs_mid[1] == masked_fill).sum().item() > (masked_imgs_mid[0] == masked_fill).sum().item()
+        assert (masked_imgs_high[0] == masked_fill).sum().item() > (masked_imgs_mid[0] == masked_fill).sum().item()
+        assert (masked_imgs_high[1] == masked_fill).sum().item() == (masked_imgs_mid[1] == masked_fill).sum().item()
+        assert torch.equal(masked_imgs_zero[1], targets_zero["image"][1])
 
     print("MNIST/MSMNIST dataset tests passed.")

@@ -1138,6 +1138,7 @@ def _build_reference_projection_signature(
         "masked_fill",
         "noise_sigma",
         "visible_corrupt",
+        "contrastive",
         "number_of_masks",
         "timesteps_per_mask",
         "num_digits",
@@ -1174,6 +1175,7 @@ def _build_clean_reference_dataloader_config(
         "masked_fill": _parse_masked_fill(masked_fill_value),
         "noise_sigma": 0.0,
         "visible_corrupt": False,
+        "contrastive": False,
         "number_of_masks": int(run_args.get("number_of_masks", 1)),
         "timesteps_per_mask": int(run_args.get("timesteps_per_mask", 1)),
         "num_digits": int(run_args.get("num_digits", 1)),
@@ -1639,6 +1641,7 @@ def _print_summary(
         "masked_fill",
         "noise_sigma",
         "visible_corrupt",
+        "contrastive",
         "number_of_masks",
         "timesteps_per_mask",
         "num_digits",
@@ -1663,6 +1666,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--masked_fill", default=None, type=str)
     parser.add_argument("--noise_sigma", default=None, type=float)
     parser.add_argument("--visible_corrupt", default=None, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--contrastive", default=None, action=argparse.BooleanOptionalAction)
     parser.add_argument("--number_of_masks", default=None, type=int)
     parser.add_argument("--timesteps_per_mask", default=None, type=int)
     parser.add_argument("--num_digits", default=None, type=int)
@@ -1721,6 +1725,7 @@ def main(argv: list[str] | None = None) -> None:
         "masked_fill": _parse_masked_fill(masked_fill_value),
         "noise_sigma": float(_config_value(args.noise_sigma, run_args, "noise_sigma", 0.25)),
         "visible_corrupt": _coerce_bool(_config_value(args.visible_corrupt, run_args, "visible_corrupt", False)),
+        "contrastive": _coerce_bool(_config_value(args.contrastive, run_args, "contrastive", False)),
         "number_of_masks": int(_config_value(args.number_of_masks, run_args, "number_of_masks", 1)),
         "timesteps_per_mask": int(_config_value(args.timesteps_per_mask, run_args, "timesteps_per_mask", 1)),
         "num_digits": int(_config_value(args.num_digits, run_args, "num_digits", 1)),

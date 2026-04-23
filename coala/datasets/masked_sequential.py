@@ -2,6 +2,7 @@ import re
 
 import torch
 import torch.utils.data as data
+from torch.utils.data._utils.collate import default_collate
 
 
 def _extract_dataset_targets(dataset: data.Dataset) -> list[int]:
@@ -18,6 +19,7 @@ def _extract_dataset_targets(dataset: data.Dataset) -> list[int]:
 
 
 class MaskedSequentialDataset(data.Dataset):
+    CONTRASTIVE_VISIBLE_RATIO = 0.3
     """
     Masked Sequential dataset where 
         image is divided into non-overlapping patches 
@@ -51,6 +53,7 @@ class MaskedSequentialDataset(data.Dataset):
         num_digits: int = 1,
         image_visibility: str = "all",
         target_type: str = "label",
+        contrastive: bool = False,
     ):
         super().__init__()
         if patch_size <= 0:
@@ -65,6 +68,8 @@ class MaskedSequentialDataset(data.Dataset):
             raise ValueError("num_digits must be > 0.")
         if mask_pattern not in ("random", "structured"):
             raise ValueError("mask_pattern must be one of: 'random', 'structured'.")
+        if contrastive and mask_pattern != "structured":
+            raise ValueError("contrastive=True is only supported with mask_pattern='structured'.")
         if isinstance(masked_fill, str):
             if masked_fill != "random":
                 raise ValueError("masked_fill must be 'random' or a float.")
@@ -92,6 +97,7 @@ class MaskedSequentialDataset(data.Dataset):
         self.visible_corrupt = visible_corrupt
         self.noise_sigma = noise_sigma
         self.image_visibility = image_visibility
+        self.contrastive = contrastive
         self.image_visibility_mode, self.image_visibility_stride = self._parse_image_visibility(image_visibility)
 
         sample_img, _ = self.dataset[0]
@@ -162,6 +168,17 @@ class MaskedSequentialDataset(data.Dataset):
                 keep = keep.repeat_interleave(self.timesteps_per_mask, dim=0)
             return keep
 
+        return self._sample_structured_occluder_keep_mask(self.num_mask)
+
+    def _sample_structured_occluder_keep_mask(self, num_mask: int) -> torch.BoolTensor:
+        m = self.number_of_masks
+        p = self.num_patches
+        num_mask = max(0, min(p, int(num_mask)))
+        if num_mask == 0:
+            return torch.ones(self.timeframes_per_digit, p, dtype=torch.bool)
+        if num_mask == p:
+            return torch.zeros(self.timeframes_per_digit, p, dtype=torch.bool)
+
         centers = torch.stack(
             (
                 torch.rand(m) * (self.patches_h - 1),
@@ -172,12 +189,98 @@ class MaskedSequentialDataset(data.Dataset):
         diffs = self.patch_coords.unsqueeze(0) - centers.unsqueeze(1)
         dists = diffs.square().sum(dim=-1)
         dists = dists + 1e-4 * torch.rand_like(dists)
-        mask_idx = dists.topk(self.num_mask, dim=1, largest=False, sorted=False).indices
+        mask_idx = dists.topk(num_mask, dim=1, largest=False, sorted=False).indices
         keep = torch.ones(m, p, dtype=torch.bool)
         keep.scatter_(1, mask_idx, False)
         if self.timesteps_per_mask > 1:
             keep = keep.repeat_interleave(self.timesteps_per_mask, dim=0)
         return keep
+
+    def _sample_structured_visible_keep_mask(self, num_keep: int) -> torch.BoolTensor:
+        m = self.number_of_masks
+        p = self.num_patches
+        num_keep = max(0, min(p, int(num_keep)))
+        if num_keep == 0:
+            return torch.zeros(self.timeframes_per_digit, p, dtype=torch.bool)
+        if num_keep == p:
+            return torch.ones(self.timeframes_per_digit, p, dtype=torch.bool)
+
+        centers = torch.stack(
+            (
+                torch.rand(m) * (self.patches_h - 1),
+                torch.rand(m) * (self.patches_w - 1),
+            ),
+            dim=1,
+        )
+        diffs = self.patch_coords.unsqueeze(0) - centers.unsqueeze(1)
+        dists = diffs.square().sum(dim=-1)
+        dists = dists + 1e-4 * torch.rand_like(dists)
+        keep_idx = dists.topk(num_keep, dim=1, largest=False, sorted=False).indices
+        keep = torch.zeros(m, p, dtype=torch.bool)
+        keep.scatter_(1, keep_idx, True)
+        if self.timesteps_per_mask > 1:
+            keep = keep.repeat_interleave(self.timesteps_per_mask, dim=0)
+        return keep
+
+    def _sample_distinct_keep_mask(self, reference_keep: torch.BoolTensor) -> torch.BoolTensor:
+        if self.num_keep in (0, self.num_patches):
+            return reference_keep.clone()
+        candidate = self._sample_keep_mask()
+        for _ in range(8):
+            if not torch.equal(candidate, reference_keep):
+                return candidate
+            candidate = self._sample_keep_mask()
+        return candidate
+
+    def _sample_contrastive_visible_keep_mask(self, reference_keep: torch.BoolTensor) -> torch.BoolTensor:
+        if self.mask_ratio == 0.0:
+            return torch.ones_like(reference_keep)
+
+        visible_ratio = self.CONTRASTIVE_VISIBLE_RATIO
+        visible_keep = int(round(visible_ratio * self.num_patches))
+        visible_keep = max(0, min(self.num_patches, visible_keep))
+        if visible_keep in (0, self.num_patches):
+            return torch.full_like(reference_keep, visible_keep == self.num_patches)
+
+        candidate = self._sample_structured_visible_keep_mask(visible_keep)
+        for _ in range(8):
+            if not torch.equal(candidate, reference_keep):
+                return candidate
+            candidate = self._sample_structured_visible_keep_mask(visible_keep)
+        return candidate
+
+    def _expand_keep_mask(self, keep: torch.BoolTensor) -> torch.BoolTensor:
+        keep = keep.view(self.timeframes_per_digit, self.patches_h, self.patches_w)
+        keep = keep.repeat_interleave(self.patch_size, dim=1).repeat_interleave(self.patch_size, dim=2)
+        return keep.unsqueeze(1)
+
+    def _masked_fill_tensor(self, img_t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
+        if self.masked_fill_mode == "random":
+            return noise
+        return torch.full_like(img_t, self.masked_fill_value)
+
+    def _compose_visible_pixels(
+        self,
+        img_t: torch.Tensor,
+        noise: torch.Tensor,
+        *,
+        force_noise: bool = False,
+    ) -> torch.Tensor:
+        if force_noise or self.visible_corrupt:
+            return (img_t + noise).clamp_(-1.0, 1.0)
+        return img_t
+
+    def _build_masked_view(
+        self,
+        img_t: torch.Tensor,
+        reveal_mask: torch.BoolTensor,
+        *,
+        force_visible_noise: bool = False,
+    ) -> torch.Tensor:
+        noise = (self.noise_sigma * torch.randn_like(img_t)).clamp_(-1.0, 1.0)
+        visible = self._compose_visible_pixels(img_t, noise, force_noise=force_visible_noise)
+        masked_imgs = torch.where(reveal_mask, visible, self._masked_fill_tensor(img_t, noise))
+        return self._apply_image_visibility(masked_imgs)
 
     def _apply_image_visibility(self, masked_imgs: torch.Tensor) -> torch.Tensor:
         if self.image_visibility_mode == "all":
@@ -216,22 +319,24 @@ class MaskedSequentialDataset(data.Dataset):
         img: torch.Tensor,
         label: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.LongTensor]:
-        keep = self._sample_keep_mask()
-        keep = keep.view(self.timeframes_per_digit, self.patches_h, self.patches_w)
-        keep = keep.repeat_interleave(self.patch_size, dim=1).repeat_interleave(self.patch_size, dim=2)
-        keep = keep.unsqueeze(1)
-
         img_t = img.unsqueeze(0).expand(self.timeframes_per_digit, -1, -1, -1)
-        noise = (self.noise_sigma * torch.randn_like(img_t)).clamp_(-1.0, 1.0)
-        visible = img_t + noise if self.visible_corrupt else img_t
-        if self.masked_fill_mode == "random":
-            masked_imgs = torch.where(keep, visible, noise)
-        else:
-            masked_imgs = torch.where(keep, visible, self.masked_fill_value)
-        masked_imgs = self._apply_image_visibility(masked_imgs)
+        keep = self._sample_keep_mask()
+        keep_pixels = self._expand_keep_mask(keep)
 
         clean_sequence = img_t.clone()
         label_sequence = torch.full((self.timeframes_per_digit,), int(label), dtype=torch.long)
+
+        if not self.contrastive:
+            masked_imgs = self._build_masked_view(img_t, keep_pixels, force_visible_noise=False)
+            return masked_imgs, clean_sequence, label_sequence
+
+        contrastive_visible_keep = self._sample_contrastive_visible_keep_mask(keep)
+        contrastive_keep_pixels = self._expand_keep_mask(contrastive_visible_keep)
+        primary_view = self._build_masked_view(img_t, keep_pixels, force_visible_noise=True)
+        inverse_view = self._build_masked_view(img_t, contrastive_keep_pixels, force_visible_noise=True)
+        masked_imgs = torch.stack((primary_view, inverse_view), dim=0)
+        clean_sequence = clean_sequence.unsqueeze(0).expand(2, -1, -1, -1, -1).clone()
+        label_sequence = label_sequence.unsqueeze(0).expand(2, -1).clone()
         return masked_imgs, clean_sequence, label_sequence
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int | torch.Tensor | dict[str, torch.Tensor]]:
@@ -254,9 +359,14 @@ class MaskedSequentialDataset(data.Dataset):
                 masked_parts.append(masked_part)
                 clean_parts.append(clean_part)
                 label_parts.append(label_part)
-            masked_imgs = torch.cat(masked_parts, dim=0)
-            clean_sequence = torch.cat(clean_parts, dim=0)
-            label_sequence = torch.cat(label_parts, dim=0)
+            cat_dim = 1 if self.contrastive else 0
+            masked_imgs = torch.cat(masked_parts, dim=cat_dim)
+            clean_sequence = torch.cat(clean_parts, dim=cat_dim)
+            label_sequence = torch.cat(label_parts, dim=cat_dim)
+            clean_target = clean_sequence
+            label_target = label_sequence
+
+        if self.contrastive and len(component_indices) == 1:
             clean_target = clean_sequence
             label_target = label_sequence
 
@@ -270,3 +380,30 @@ class MaskedSequentialDataset(data.Dataset):
                 "label": torch.as_tensor(label_target, dtype=torch.long),
             }
         return masked_imgs, target
+
+
+def _flatten_contrastive_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim < 2 or tensor.shape[1] != 2:
+        return tensor
+    return tensor.reshape(tensor.shape[0] * tensor.shape[1], *tensor.shape[2:])
+
+
+def _flatten_contrastive_targets(targets):
+    if isinstance(targets, dict):
+        flattened = {key: _flatten_contrastive_targets(value) for key, value in targets.items()}
+        batch_size = next(iter(flattened.values())).shape[0] if flattened else 0
+        flattened["contrastive_group"] = torch.arange(batch_size // 2, dtype=torch.long).repeat_interleave(2)
+        flattened["contrastive_view"] = torch.arange(2, dtype=torch.long).repeat(batch_size // 2)
+        flattened["contrastive_positive_index"] = torch.arange(batch_size, dtype=torch.long).view(-1, 2).flip(1).reshape(-1)
+        return flattened
+    if torch.is_tensor(targets):
+        return _flatten_contrastive_tensor(targets)
+    return targets
+
+
+def masked_sequential_collate(batch):
+    masked_imgs, targets = default_collate(batch)
+    if masked_imgs.ndim != 6 or masked_imgs.shape[1] != 2:
+        return masked_imgs, targets
+    masked_imgs = masked_imgs.reshape(masked_imgs.shape[0] * masked_imgs.shape[1], *masked_imgs.shape[2:])
+    return masked_imgs, _flatten_contrastive_targets(targets)

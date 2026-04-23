@@ -5,7 +5,7 @@ from torch.utils.data import random_split
 from torchvision import transforms
 
 from coala import DATADIR
-from coala.datasets.masked_sequential import MaskedSequentialDataset
+from coala.datasets.masked_sequential import MaskedSequentialDataset, masked_sequential_collate
 
 def msmnist(
     root: str = DATADIR,
@@ -24,6 +24,7 @@ def msmnist(
     image_visibility: str = "all",
     accepted_digits: list[int] | None = None,
     target_type: str = "label",
+    contrastive: bool = False,
 ):
     """
     Returns data loaders for Masked Sequential MNIST.
@@ -36,6 +37,10 @@ def msmnist(
     [-1, 1]-normalized image, or target_type="both" to return both the clean image
     and label in a dictionary. When num_digits > 1, clean targets are returned per
     timestep and labels are returned as per-timestep sequences.
+
+    When contrastive=True, each sampled source image produces two masked-sequential
+    views. The dataloader flattens them into an interleaved batch order
+    `(sample0_view0, sample0_view1, sample1_view0, sample1_view1, ...)`.
     """
     data_transforms = transforms.Compose(
         [
@@ -93,6 +98,7 @@ def msmnist(
         num_digits=num_digits,
         image_visibility=image_visibility,
         target_type=target_type,
+        contrastive=contrastive,
     )
     val_dataset = MaskedSequentialDataset(
         val_base,
@@ -107,6 +113,7 @@ def msmnist(
         num_digits=num_digits,
         image_visibility=image_visibility,
         target_type=target_type,
+        contrastive=contrastive,
     )
     test_dataset = MaskedSequentialDataset(
         test_set,
@@ -121,6 +128,7 @@ def msmnist(
         num_digits=num_digits,
         image_visibility=image_visibility,
         target_type=target_type,
+        contrastive=contrastive,
     )
 
     train_loader = data.DataLoader(
@@ -130,6 +138,7 @@ def msmnist(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
+        collate_fn=masked_sequential_collate,
     )
     val_loader = data.DataLoader(
         val_dataset,
@@ -137,6 +146,7 @@ def msmnist(
         shuffle=False,
         num_workers=0,
         drop_last=False,
+        collate_fn=masked_sequential_collate,
     )
     test_loader = data.DataLoader(
         test_dataset,
@@ -144,6 +154,7 @@ def msmnist(
         shuffle=True,
         num_workers=0,
         drop_last=False,
+        collate_fn=masked_sequential_collate,
     )
 
     return train_loader, val_loader, test_loader
@@ -162,6 +173,7 @@ def visualize_msmnist_examples(
     image_visibility: str = "all",
     accepted_digits: list[int] | None = None,
     target_type: str = "label",
+    contrastive: bool = False,
     show: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor | int | dict[str, torch.Tensor]]:
     import matplotlib.pyplot as plt
@@ -179,6 +191,7 @@ def visualize_msmnist_examples(
         patch_size=patch_size,
         accepted_digits=accepted_digits,
         target_type=target_type,
+        contrastive=contrastive,
     )
     batch = next(iter(train_loader))
     masked_imgs, targets = batch

@@ -144,6 +144,8 @@ def prepare_batch(
             clean_image = clean_image[:, :rollout_length]
         if labels.dim() == 2:
             labels = labels[:, :rollout_length]
+
+    # TODO: Do contrastive 2nd augmentation on clean image to double batch size
     return x, clean_image, labels
 
 
@@ -172,7 +174,7 @@ def expand_label_targets(labels: torch.Tensor, n_steps: int) -> torch.Tensor:
 def compute_losses(
     recon: torch.Tensor,
     class_logits: torch.Tensor,
-    # latents: torch.Tensor,
+    latents: torch.Tensor,
     clean_image: torch.Tensor,
     labels: torch.Tensor,
     t0_weight: float = 0.5,
@@ -181,14 +183,19 @@ def compute_losses(
     target_recon = expand_clean_targets(clean_image, recon.shape[1])
     target_labels = expand_label_targets(labels, class_logits.shape[1])
     recon_loss = F.smooth_l1_loss(recon, target_recon, reduction = 'none', beta = 0.0) # l1 if beta = 0 / huber if beta > 0
-    class_loss = F.cross_entropy(class_logits.view(-1, class_logits.shape[-1]),target_labels.reshape(-1),
-                                 reduction='none').view(class_logits.shape[0], class_logits.shape[1])
-    
+    # class_loss = F.cross_entropy(class_logits.view(-1, class_logits.shape[-1]),target_labels.reshape(-1),
+    #                              reduction='none').view(class_logits.shape[0], class_logits.shape[1])
+    breakpoint()
     # TODO
-    # Make class loss the invariance loss on the last layer trajectories
-    # We want the latents of same class to be similar across time steps, 
-    # so we can use MSE loss between all pairs of time steps. 
+    # Replace class loss with invariance loss on the last layer trajectories
     # We can weight the loss with the same weight as the MSE loss
+    # Semi-supervised
+        # We want the latents of same class to be similar across time steps, 
+        # so we can use MSE loss between all pairs of time steps. 
+    # Self-supervised
+        # Use different corruptions of the same image as positive pairs,
+        # and different corruptions of different images as negative pairs
+    # -> NT-Xent loss / InfoNCE loss
 
     recon_loss = (recon_loss.mean(dim=[2, 3, 4]) * weights).mean()
     class_loss = (class_loss * weights).mean()
@@ -292,10 +299,11 @@ def evaluate(
             break
 
         masked_inputs, clean_image, labels = prepare_batch(batch, device)
-        recon, class_logits = model(masked_inputs)
-        # model_outputs = model(masked_inputs, return_layer_trajectories=True)
-        # recon, class_logits, latents = model_outputs["recon"], model_outputs["class_logits"], model_outputs["layer_trajectories"]['L3']
-        recon_loss, class_loss, loss = compute_losses(recon, class_logits, clean_image, labels, t0_weight=t0_weight)
+        # recon, class_logits = model(masked_inputs)
+        model_outputs = model(masked_inputs, return_layer_trajectories=True)
+        recon, class_logits, latents = model_outputs["recon"], model_outputs["class_logits"], model_outputs["layer_trajectories"]['L3']
+        # recon_loss, class_loss, loss = compute_losses(recon, class_logits, clean_image, labels, t0_weight=t0_weight)
+        recon_loss, class_loss, loss = compute_losses(recon, class_logits, latents, clean_image, labels, t0_weight=t0_weight)
 
         batch_size = masked_inputs.shape[0]
         total_loss += loss.item() * batch_size
@@ -363,8 +371,11 @@ def train(
 
             rollout_length = torch.randint(low=8, high=20, size=(1,), device=device).item()
             masked_inputs, clean_image, labels = prepare_batch(batch, device, rollout_length=rollout_length)
-            recon, class_logits = model(masked_inputs)
-            recon_loss, class_loss, loss = compute_losses(recon, class_logits, clean_image, labels, t0_weight=args.t0_weight if args is not None else 0.5)
+            # recon, class_logits = model(masked_inputs)
+            model_outputs = model(masked_inputs, return_layer_trajectories=True)
+            recon, class_logits, latents = model_outputs["recon"], model_outputs["class_logits"], model_outputs["layer_trajectories"]['L3']
+            # recon_loss, class_loss, loss = compute_losses(recon, class_logits, clean_image, labels, t0_weight=args.t0_weight if args is not None else 0.5)
+            recon_loss, class_loss, loss = compute_losses(recon, class_logits, latents, clean_image, labels, t0_weight=args.t0_weight if args is not None else 0.5)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -446,6 +457,7 @@ def main():
         timesteps_per_mask=args.timesteps_per_mask,
         num_digits=args.num_digits,
         image_visibility=args.image_visibility,
+        contrastive=args.contrastive,
         target_type="both",
     )
     model = rCNN()
@@ -478,6 +490,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--num_digits", type=int, default=1)
     parser.add_argument("--image_visibility", type=str, default="all")
     parser.add_argument("--visible_corrupt", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--contrastive", action=argparse.BooleanOptionalAction)
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--max_val_batches", type=int, default=None)
     parser.add_argument("--data_dir", type=str, default=str(DATADIR))
