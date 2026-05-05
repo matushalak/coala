@@ -19,9 +19,21 @@ from coala.autoencoder.cnn import ResidualMLP
 class rCNN(nn.Module):
     """
     Even simpler Recurrent Convolutional Neural Network.
+    
+    # for models 1-6
+        #  V1_features: int = 16, V2_features: int = 32, V4_features: int = 64
+    # model 7
+        # V1_features: int = 12, V2_features: int = 6, V4_features: int = 3
+    # model 8
+        # V1_features: int = 16, V2_features: int = 32, V4_features: int = 8
+    # model 9
+        # V1_features: int = 16, V2_features: int = 64, V4_features: int = 5
     """
 
-    def __init__(self, input_features: int = 1, V1_features: int = 16, V2_features: int = 32, V4_features: int = 64):
+    def __init__(self, 
+                 input_features: int = 1,
+                 V1_features: int = 16, V2_features: int = 32, V4_features: int = 64
+                 ):
         super().__init__()
         
         self.W_recon = nn.ConvTranspose2d(V1_features, input_features, kernel_size=5, padding=2, stride=2, output_padding=1)
@@ -235,8 +247,9 @@ def compute_losses(
     else:
         class_loss = nt_xent_loss(latents, contrastive_positive_index)
         class_loss = (class_loss * weights).mean()
+        # class_loss = torch.ones_like(recon_loss) 
 
-    return recon_loss, class_loss, recon_loss + (0.05*class_loss)
+    return recon_loss, class_loss, recon_loss #+ (0.05*class_loss)
 
 
 def make_reconstruction_grid(

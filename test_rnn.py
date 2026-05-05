@@ -1667,6 +1667,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--noise_sigma", default=None, type=float)
     parser.add_argument("--visible_corrupt", default=None, action=argparse.BooleanOptionalAction)
     parser.add_argument("--contrastive", default=None, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--not_contrastive", default=None, action=argparse.BooleanOptionalAction)
     parser.add_argument("--number_of_masks", default=None, type=int)
     parser.add_argument("--timesteps_per_mask", default=None, type=int)
     parser.add_argument("--num_digits", default=None, type=int)
@@ -1691,10 +1692,19 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda", "mps"))
     return parser
 
+def coerce_contrastive(contrastive: bool | None, not_contrastive: bool | None) -> bool | None:
+    if contrastive is True and not_contrastive is True:
+        raise ValueError("Cannot specify both --contrastive and --not-contrastive.")
+    if contrastive is True:
+        return True
+    if not_contrastive is True:
+        return False
+    return None
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_argparser()
     args = parser.parse_args(argv)
+    args.contrastive = coerce_contrastive(args.contrastive, args.not_contrastive)
 
     family = _normalize_family_name(args.family) or "hcrnn"
     checkpoint_path = Path(args.checkpoint_path) if args.checkpoint_path is not None else _latest_checkpoint(family)
