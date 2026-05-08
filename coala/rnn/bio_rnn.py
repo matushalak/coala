@@ -15,7 +15,7 @@ from coala.datasets import get_dataloaders
 from coala.rnn.utils import EMA
 from coala.autoencoder.cnn import ResidualMLP
 
-
+# TODO
 class BioRNN(nn.Module):
     """
     Simplest Hierarchical Recurrent Neural Network.
@@ -31,7 +31,7 @@ class BioRNN(nn.Module):
 
     TODO: 
     incorporate Dale's law by constraining weights and splitting each layer into excitatory and inhibitory subpopulations.
-    Each layer 80/20 inhibitory/excitatory with neurons randomly initialized as E or I, which determines their weights
+    Each layer 80/20 excitatory/inhibitory with neurons randomly initialized as E or I, which determines their weights
         - E neurons have non-negative outgoing weights, I neurons have non-positive outgoing weights 
             - (implement via clipping or exp. paramaterization & masking)
         - E neurons receive FF inputs from E neurons of previous layer, recurrent inputs from all neurons in same layer, and FB inputs from E neurons of next layer; 
@@ -42,7 +42,7 @@ class BioRNN(nn.Module):
     def __init__(self, 
                  input_features: int = 1,
                  input_size: int = 28*28,
-                 V1_features: int = 196, V2_features: int = 49, V4_features: int = 7
+                 V1_features: int = 392, V2_features: int = 196, V4_features: int = 49
                  ):
         super().__init__()
         

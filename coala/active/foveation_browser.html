@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Active Foveation Browser</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --ink: #1d1a16;
+      --muted: #6d6559;
+      --panel: rgba(255, 251, 246, 0.92);
+      --panel-border: rgba(56, 42, 24, 0.12);
+      --accent: #bd4a1b;
+      --accent-2: #1f6d8c;
+      --accent-soft: rgba(189, 74, 27, 0.12);
+      --shadow: 0 24px 60px rgba(65, 48, 24, 0.14);
+      --radius: 22px;
+      color-scheme: light;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 0% 0%, rgba(255, 202, 150, 0.82), transparent 24%),
+        radial-gradient(circle at 100% 10%, rgba(182, 226, 242, 0.8), transparent 26%),
+        linear-gradient(180deg, #fcf7f1 0%, var(--bg) 100%);
+    }
+
+    .shell {
+      width: min(1500px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 22px 0 36px;
+    }
+
+    .hero, .controls, .panel {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .hero {
+      padding: 28px;
+      display: grid;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2.3rem, 4vw, 4.6rem);
+      line-height: 0.92;
+      letter-spacing: -0.05em;
+    }
+
+    .subtitle {
+      margin: 0;
+      max-width: 72ch;
+      color: var(--muted);
+      line-height: 1.58;
+      font-size: 1rem;
+    }
+
+    .hero-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .chip {
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(56, 42, 24, 0.09);
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+
+    .controls {
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+
+    .controls-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .control {
+      display: grid;
+      gap: 6px;
+    }
+
+    .control label {
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    input, select, button {
+      width: 100%;
+      font: inherit;
+      color: var(--ink);
+      border: 1px solid rgba(56, 42, 24, 0.14);
+      border-radius: 14px;
+      padding: 11px 13px;
+      background: rgba(255, 255, 255, 0.96);
+    }
+
+    input[type="range"] {
+      padding: 0;
+      accent-color: var(--accent);
+      background: transparent;
+    }
+
+    .range-readout {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      align-items: end;
+      justify-content: flex-end;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 800;
+      transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff6ef;
+    }
+
+    button.secondary {
+      background: var(--accent-2);
+      border-color: var(--accent-2);
+      color: #f6fdff;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 24px rgba(56, 42, 24, 0.15);
+    }
+
+    .columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .panel {
+      padding: 18px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 1.55rem;
+      letter-spacing: -0.03em;
+    }
+
+    .panel-meta {
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 0.92rem;
+    }
+
+    .sample-controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr auto;
+      gap: 10px;
+    }
+
+    .views {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    .view-card {
+      display: grid;
+      gap: 10px;
+      background: rgba(255, 255, 255, 0.74);
+      border: 1px solid rgba(56, 42, 24, 0.08);
+      border-radius: 18px;
+      padding: 12px;
+    }
+
+    .view-title {
+      margin: 0;
+      font-size: 0.9rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .image-frame {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      border-radius: 14px;
+      overflow: hidden;
+      background:
+        linear-gradient(135deg, rgba(189, 74, 27, 0.11), rgba(31, 109, 140, 0.18));
+      display: grid;
+      place-items: center;
+    }
+
+    .image-frame img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      cursor: crosshair;
+      image-rendering: auto;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+
+    .error {
+      color: #912e12;
+      background: rgba(210, 65, 28, 0.08);
+      border: 1px solid rgba(210, 65, 28, 0.18);
+      border-radius: 14px;
+      padding: 12px 14px;
+    }
+
+    @media (max-width: 1180px) {
+      .controls-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .columns { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100vw - 16px, 1500px); }
+      .controls-grid { grid-template-columns: 1fr; }
+      .sample-controls, .views { grid-template-columns: 1fr; }
+      .actions { justify-content: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <h1>Active Foveation Browser</h1>
+      <p class="subtitle">
+        Probe fixation and foveation settings on MNIST and STL-10 side-by-side. Click either original image to set fixation directly, then compare the untouched input, the fixation overlay, the eccentricity-dependent blur stage, and the final blur-plus-cortical-magnification rendering under the exact same shared parameters.
+      </p>
+      <div class="hero-stats">
+        <div class="chip">Shared controls, paired comparison</div>
+        <div class="chip">Direct click-to-fixate interaction</div>
+        <div class="chip">Local HTTP server, no extra framework</div>
+      </div>
+    </section>
+
+    <section class="controls">
+      <div class="controls-grid">
+        <div class="control">
+          <label for="fixationX">Fixation X</label>
+          <input id="fixationX" type="range" min="0" max="1" step="0.001" value="0.5">
+          <div class="range-readout"><span>left to right</span><strong id="fixationXValue">0.500</strong></div>
+        </div>
+        <div class="control">
+          <label for="fixationY">Fixation Y</label>
+          <input id="fixationY" type="range" min="0" max="1" step="0.001" value="0.5">
+          <div class="range-readout"><span>top to bottom</span><strong id="fixationYValue">0.500</strong></div>
+        </div>
+        <div class="control">
+          <label for="foveaRadiusRatio">Fovea Radius</label>
+          <input id="foveaRadiusRatio" type="range" min="0.02" max="0.35" step="0.002" value="0.12">
+          <div class="range-readout"><span>normalized image radius</span><strong id="foveaRadiusRatioValue">0.120</strong></div>
+        </div>
+        <div class="control">
+          <label for="kerwCoef">Blur Strength</label>
+          <input id="kerwCoef" type="range" min="0" max="0.12" step="0.002" value="0.06">
+          <div class="range-readout"><span>eccentricity to sigma slope</span><strong id="kerwCoefValue">0.060</strong></div>
+        </div>
+        <div class="control">
+          <label for="ringSpacing">Ring Spacing</label>
+          <input id="ringSpacing" type="range" min="0.08" max="0.6" step="0.01" value="0.2">
+          <div class="range-readout"><span>log eccentricity spacing</span><strong id="ringSpacingValue">0.200</strong></div>
+        </div>
+        <div class="control">
+          <label for="parafovealNoiseStd">Parafoveal Noise</label>
+          <input id="parafovealNoiseStd" type="range" min="0" max="0.35" step="0.005" value="0.0">
+          <div class="range-readout"><span>eccentricity-weighted correlated texture</span><strong id="parafovealNoiseStdValue">0.000</strong></div>
+        </div>
+        <div class="control">
+          <label for="magnifFovRatio">Magnification FOV</label>
+          <input id="magnifFovRatio" type="range" min="0.04" max="0.45" step="0.005" value="0.22">
+          <div class="range-readout"><span>inner linear zone</span><strong id="magnifFovRatioValue">0.220</strong></div>
+        </div>
+      </div>
+      <div class="controls-grid" style="margin-top:14px; grid-template-columns: repeat(4, minmax(0, 1fr));">
+        <div class="control">
+          <label for="magnifKRatio">Magnification K</label>
+          <input id="magnifKRatio" type="range" min="0" max="0.6" step="0.01" value="0.22">
+          <div class="range-readout"><span>peripheral warp curvature</span><strong id="magnifKRatioValue">0.220</strong></div>
+        </div>
+        <div class="control">
+          <label for="coverRatio">Cover Ratio</label>
+          <input id="coverRatio" type="range" min="0.15" max="1.0" step="0.01" value="1.0">
+          <div class="range-readout"><span>overall magnification crop</span><strong id="coverRatioValue">1.00</strong></div>
+        </div>
+        <div class="control">
+          <label for="markerRadius">Marker Radius</label>
+          <input id="markerRadius" type="range" min="1" max="10" step="1" value="3">
+          <div class="range-readout"><span>overlay size</span><strong id="markerRadiusValue">3</strong></div>
+        </div>
+        <div class="actions">
+          <button class="primary" id="rerenderBtn" type="button">Render Both</button>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="randomBothBtn" type="button">Randomize Samples</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="columns">
+      <article class="panel" data-dataset="mnist">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">MNIST</h2>
+            <div class="panel-meta" id="mnistMeta">Loading…</div>
+          </div>
+        </div>
+        <div class="sample-controls">
+          <div class="control">
+            <label for="mnistSplit">Split</label>
+            <select id="mnistSplit"></select>
+          </div>
+          <div class="control">
+            <label for="mnistIndex">Index</label>
+            <input id="mnistIndex" type="number" min="0" step="1" placeholder="random">
+          </div>
+          <div class="control">
+            <label for="mnistLabel">Label</label>
+            <input id="mnistLabel" type="text" disabled value="">
+          </div>
+          <div class="actions">
+            <button class="primary" id="mnistRandomBtn" type="button">Random</button>
+          </div>
+        </div>
+        <div class="views" style="grid-template-columns: repeat(4, 1fr);">
+          <div class="view-card">
+            <h3 class="view-title">Original</h3>
+            <div class="image-frame"><img id="mnistOriginal" alt="MNIST original"></div>
+            <div class="hint">Click to move the shared fixation point.</div>
+          </div>
+          <div class="view-card">
+            <h3 class="view-title">Fixation Overlay</h3>
+            <div class="image-frame"><img id="mnistOverlay" alt="MNIST overlay"></div>
+            <div class="hint">Same sample, same fixation, explicit marker.</div>
+          </div>
+          <div class="view-card">
+            <h3 class="view-title">Perceptual Blur</h3>
+            <div class="image-frame"><img id="mnistPerceptual" alt="MNIST perceptual blur"></div>
+            <div class="hint">Reference-style eccentricity-dependent blur bands.</div>
+          </div>
+          <div class="view-card">
+            <h3 class="view-title">Blur + Magnification</h3>
+            <div class="image-frame"><img id="mnistCombined" alt="MNIST combined foveation"></div>
+            <div class="hint">Perceptual blur followed by cortical magnification warp.</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel" data-dataset="stl10">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">STL-10</h2>
+            <div class="panel-meta" id="stl10Meta">Loading…</div>
+          </div>
+        </div>
+        <div class="sample-controls">
+          <div class="control">
+            <label for="stl10Split">Split</label>
+            <select id="stl10Split"></select>
+          </div>
+          <div class="control">
+            <label for="stl10Index">Index</label>
+            <input id="stl10Index" type="number" min="0" step="1" placeholder="random">
+          </div>
+          <div class="control">
+            <label for="stl10Label">Label</label>
+            <input id="stl10Label" type="text" disabled value="">
+          </div>
+          <div class="actions">
+            <button class="primary" id="stl10RandomBtn" type="button">Random</button>
+          </div>
+        </div>
+        <div class="views" style="grid-template-columns: repeat(4, 1fr);">
+          <div class="view-card">
+            <h3 class="view-title">Original</h3>
+            <div class="image-frame"><img id="stl10Original" alt="STL-10 original"></div>
+            <div class="hint">Click to move the shared fixation point.</div>
+          </div>
+          <div class="view-card">
+            <h3 class="view-title">Fixation Overlay</h3>
+            <div class="image-frame"><img id="stl10Overlay" alt="STL-10 overlay"></div>
+            <div class="hint">Same sample, same fixation, explicit marker.</div>
+          </div>
+          <div class="view-card">
+            <h3 class="view-title">Perceptual Blur</h3>
+            <div class="image-frame"><img id="stl10Perceptual" alt="STL-10 perceptual blur"></div>
+            <div class="hint">Reference-style eccentricity-dependent blur bands.</div>
+          </div>
+          <div class="view-card">
+            <h3 class="view-title">Blur + Magnification</h3>
+            <div class="image-frame"><img id="stl10Combined" alt="STL-10 combined foveation"></div>
+            <div class="hint">Perceptual blur followed by cortical magnification warp.</div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <div id="errorBox" class="error" hidden></div>
+  </div>
+
+  <script>
+    const controls = {
+      fixationX: document.getElementById("fixationX"),
+      fixationY: document.getElementById("fixationY"),
+      foveaRadiusRatio: document.getElementById("foveaRadiusRatio"),
+      kerwCoef: document.getElementById("kerwCoef"),
+      ringSpacing: document.getElementById("ringSpacing"),
+      parafovealNoiseStd: document.getElementById("parafovealNoiseStd"),
+      magnifFovRatio: document.getElementById("magnifFovRatio"),
+      magnifKRatio: document.getElementById("magnifKRatio"),
+      coverRatio: document.getElementById("coverRatio"),
+      markerRadius: document.getElementById("markerRadius"),
+    };
+
+    const readouts = {
+      fixationX: document.getElementById("fixationXValue"),
+      fixationY: document.getElementById("fixationYValue"),
+      foveaRadiusRatio: document.getElementById("foveaRadiusRatioValue"),
+      kerwCoef: document.getElementById("kerwCoefValue"),
+      ringSpacing: document.getElementById("ringSpacingValue"),
+      parafovealNoiseStd: document.getElementById("parafovealNoiseStdValue"),
+      magnifFovRatio: document.getElementById("magnifFovRatioValue"),
+      magnifKRatio: document.getElementById("magnifKRatioValue"),
+      coverRatio: document.getElementById("coverRatioValue"),
+      markerRadius: document.getElementById("markerRadiusValue"),
+    };
+
+    const panels = {
+      mnist: {
+        split: document.getElementById("mnistSplit"),
+        index: document.getElementById("mnistIndex"),
+        label: document.getElementById("mnistLabel"),
+        meta: document.getElementById("mnistMeta"),
+        original: document.getElementById("mnistOriginal"),
+        overlay: document.getElementById("mnistOverlay"),
+        perceptual: document.getElementById("mnistPerceptual"),
+        combined: document.getElementById("mnistCombined"),
+        randomBtn: document.getElementById("mnistRandomBtn"),
+      },
+      stl10: {
+        split: document.getElementById("stl10Split"),
+        index: document.getElementById("stl10Index"),
+        label: document.getElementById("stl10Label"),
+        meta: document.getElementById("stl10Meta"),
+        original: document.getElementById("stl10Original"),
+        overlay: document.getElementById("stl10Overlay"),
+        perceptual: document.getElementById("stl10Perceptual"),
+        combined: document.getElementById("stl10Combined"),
+        randomBtn: document.getElementById("stl10RandomBtn"),
+      },
+    };
+
+    const rerenderBtn = document.getElementById("rerenderBtn");
+    const randomBothBtn = document.getElementById("randomBothBtn");
+    const errorBox = document.getElementById("errorBox");
+
+    let manifest = null;
+    let debounceTimer = null;
+
+    function showError(message) {
+      errorBox.hidden = false;
+      errorBox.textContent = message;
+    }
+
+    function clearError() {
+      errorBox.hidden = true;
+      errorBox.textContent = "";
+    }
+
+    function updateReadouts() {
+      Object.entries(controls).forEach(([name, control]) => {
+        const decimals = name === "markerRadius" ? 0 : (name === "coverRatio" ? 2 : 3);
+        readouts[name].textContent = Number(control.value).toFixed(decimals);
+      });
+    }
+
+    function fillSplitOptions(datasetName) {
+      const panel = panels[datasetName];
+      panel.split.innerHTML = "";
+      const splits = manifest.datasets[datasetName].splits;
+      Object.entries(splits).forEach(([splitName, count]) => {
+        const option = document.createElement("option");
+        option.value = splitName;
+        option.textContent = `${splitName} (${count.toLocaleString()})`;
+        panel.split.appendChild(option);
+      });
+    }
+
+    function queryFor(datasetName, randomize = false) {
+      const params = new URLSearchParams();
+      params.set("dataset", datasetName);
+      params.set("split", panels[datasetName].split.value);
+      if (!randomize) {
+        const indexValue = panels[datasetName].index.value.trim();
+        if (indexValue !== "") {
+          params.set("index", indexValue);
+        }
+      }
+      Object.entries(controls).forEach(([name, control]) => {
+        const apiName = name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+        params.set(apiName, control.value);
+      });
+      return params.toString();
+    }
+
+    async function renderDataset(datasetName, randomize = false) {
+      const panel = panels[datasetName];
+      const response = await fetch(`/api/render?${queryFor(datasetName, randomize)}`);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || `Failed to render ${datasetName}.`);
+      }
+
+      panel.original.src = payload.images.original;
+      panel.overlay.src = payload.images.overlay;
+      panel.perceptual.src = payload.images.perceptual;
+      panel.combined.src = payload.images.combined;
+      panel.index.value = payload.index;
+      panel.label.value = payload.label_name;
+      panel.meta.textContent = `split=${payload.split}  index=${payload.index}  label=${payload.label_name}  size=${payload.image_size[0]}x${payload.image_size[1]}`;
+    }
+
+    async function renderBoth(randomize = false) {
+      clearError();
+      try {
+        await Promise.all([
+          renderDataset("mnist", randomize),
+          renderDataset("stl10", randomize),
+        ]);
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    function scheduleRender() {
+      updateReadouts();
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(() => {
+        renderBoth(false);
+      }, 120);
+    }
+
+    function bindImageClick(datasetName) {
+      const original = panels[datasetName].original;
+      original.addEventListener("click", (event) => {
+        const rect = original.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          return;
+        }
+        const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+        const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+        controls.fixationX.value = x.toFixed(3);
+        controls.fixationY.value = y.toFixed(3);
+        scheduleRender();
+      });
+    }
+
+    async function init() {
+      updateReadouts();
+      const response = await fetch("/api/manifest");
+      manifest = await response.json();
+
+      fillSplitOptions("mnist");
+      fillSplitOptions("stl10");
+      bindImageClick("mnist");
+      bindImageClick("stl10");
+
+      Object.values(controls).forEach((control) => {
+        control.addEventListener("input", scheduleRender);
+      });
+      Object.keys(panels).forEach((datasetName) => {
+        const panel = panels[datasetName];
+        panel.split.addEventListener("change", () => renderDataset(datasetName, true));
+        panel.index.addEventListener("change", () => renderDataset(datasetName, false));
+        panel.randomBtn.addEventListener("click", () => renderDataset(datasetName, true));
+      });
+      rerenderBtn.addEventListener("click", () => renderBoth(false));
+      randomBothBtn.addEventListener("click", () => renderBoth(true));
+
+      await renderBoth(true);
+    }
+
+    init().catch((error) => {
+      showError(error.message);
+    });
+  </script>
+</body>
+</html>

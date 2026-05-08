@@ -12,6 +12,8 @@ _EXPORTS = {
     "kmnist": "coala.datasets.kmnist:kmnist",
     "moving_mnist": "coala.datasets.moving_mnist:moving_mnist",
     "stl10": "coala.datasets.stl10:stl10",
+    "download_stl10": "coala.datasets.stl10:download_stl10",
+    "export_stl10_png_bank": "coala.datasets.stl10:export_stl10_png_bank",
     "tiny_imagenet": "coala.datasets.tiny_imagenet:tiny_imagenet",
     "prepare_tiny_imagenet": "coala.datasets.tiny_imagenet:prepare_tiny_imagenet",
     "caltech101": "coala.datasets.caltech:caltech101",

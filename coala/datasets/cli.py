@@ -4,6 +4,7 @@ import argparse
 import ast
 
 from coala.datasets.registry import download_dataset, get_dataloaders, list_datasets
+from coala.datasets.stl10 import export_stl10_png_bank
 
 
 def _coerce_value(raw_value: str):
@@ -47,6 +48,41 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--download", action="store_true")
     inspect_parser.add_argument("--arg", action="append", default=[], help="Extra key=value args.")
 
+    export_stl10_parser = subparsers.add_parser(
+        "export-stl10-pngs",
+        help="Export STL-10 images as PNGs and generate a static HTML browser.",
+    )
+    export_stl10_parser.add_argument("--root", default=None, help="Dataset root. Defaults to coala.DATADIR.")
+    export_stl10_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Export directory. Defaults to <root>/stl10/png_bank.",
+    )
+    export_stl10_parser.add_argument("--download", action="store_true")
+    export_stl10_parser.add_argument(
+        "--include-unlabeled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include the 100k unlabeled STL-10 split in the export.",
+    )
+    export_stl10_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Delete and recreate the export directory before writing files.",
+    )
+    export_stl10_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional cap on the number of exported images per split.",
+    )
+    export_stl10_parser.add_argument(
+        "--viewer",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write index.html alongside the PNG bank.",
+    )
+
     return parser
 
 
@@ -71,13 +107,33 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
 
-    extra_kwargs = _parse_key_values(args.arg)
-
     if args.command == "download":
+        extra_kwargs = _parse_key_values(args.arg)
         download_result = download_dataset(args.dataset, **extra_kwargs)
         print(download_result)
         return 0
 
+    if args.command == "export-stl10-pngs":
+        result = export_stl10_png_bank(
+            root=args.root,
+            output_dir=args.output_dir,
+            download=args.download,
+            include_unlabeled=args.include_unlabeled,
+            overwrite=args.overwrite,
+            limit_per_split=args.limit,
+            write_viewer=args.viewer,
+        )
+        print(f"export_dir={result.export_dir}")
+        print(f"total_images={result.total_images}")
+        for split_name, count in result.split_counts.items():
+            print(f"{split_name}={count}")
+        print(f"metadata={result.metadata_path}")
+        print(f"manifest={result.manifest_path}")
+        if result.viewer_path is not None:
+            print(f"viewer={result.viewer_path}")
+        return 0
+
+    extra_kwargs = _parse_key_values(args.arg)
     loaders = get_dataloaders(
         args.dataset,
         batch_size=args.batch_size,
